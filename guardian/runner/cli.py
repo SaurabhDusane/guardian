@@ -106,11 +106,17 @@ def run(
         help="Inject a fault for this run (repeatable), e.g. b6_enrich:corrupt:0.5:region "
         "or b6_enrich:crash. Forms: corrupt, null, drop, rename, crash.",
     ),
+    only: list[str] | None = typer.Option(
+        None, "--only", help="Run only these blocks (repeatable); others are not executed."
+    ),
 ) -> None:
     """Run a pipeline spec end to end and print a per-block summary."""
     spec_path = find_spec(spec)
     with _open(root, spec_path, sample_rate, fault) as g:
-        report = Executor(g).run(run_id)
+        try:
+            report = Executor(g).run(run_id, only=only)
+        except KeyError as exc:
+            raise typer.BadParameter(str(exc.args[0]), param_hint="--only") from exc
         _save_state(root, spec_path)
         console.print(render_report(report))
         quarantined = sum(r.quarantined for r in report.blocks)
@@ -167,11 +173,20 @@ def replay(
         except KeyError as exc:
             console.print(f"[red]{exc.args[0]}[/red]")
             raise typer.Exit(code=2) from exc
-        console.print(
+        line = (
             f"{block}: replayed [green]{result.replayed}[/green], "
             f"still failing [yellow]{result.still_failing}[/yellow]"
-            + (f", new last-good snapshot {result.snapshot.run_id}" if result.snapshot else "")
         )
+        if result.snapshot and result.merged:
+            line += f", upserted into new last-good snapshot {result.snapshot.run_id}"
+        elif result.snapshot:
+            line += (
+                f"\n[yellow]WARN[/yellow]: no merge_key declared; replayed rows written to "
+                f"separate snapshot {result.snapshot.run_id}, last-good unchanged"
+            )
+        elif result.replayed == 0 and result.still_failing == 0:
+            line += " (nothing to replay)"
+        console.print(line)
 
 
 @app.command()

@@ -21,6 +21,8 @@ def test_loads_demo_spec() -> None:
     assert edge.source == "b5_normalize" and edge.adapter == "demo.blocks:b5_to_b6_shape"
     assert s.block("b1_ingest").params["rows"] == 500
     assert s.block("b1_ingest").quarantine_threshold == 0.2
+    assert all(b.merge_key for b in s.blocks)  # every demo block declares one
+    assert s.block("b8_aggregate").merge_key == ("order_date", "region", "segment")
 
 
 def test_topological_order_respects_inputs_and_fallback_sources() -> None:
@@ -126,6 +128,8 @@ def test_rejects_fallback_for_non_input() -> None:
             "duplicate",
         ),
         ({"name": "p", "blocks": [{"name": "a", "fn": "m:f", "inputs": "b"}]}, "list"),
+        ({"name": "p", "blocks": [{"name": "a", "fn": "m:f", "merge_key": "id"}]}, "merge_key"),
+        ({"name": "p", "blocks": [{"name": "a", "fn": "m:f", "merge_key": []}]}, "merge_key"),
     ],
 )
 def test_rejects_malformed(raw, match) -> None:

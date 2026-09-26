@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import abc
 import dataclasses
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -73,7 +73,8 @@ class ScenarioRunner(abc.ABC):
     # -------------------------------------------------------------- actions
 
     @abc.abstractmethod
-    def run(self, run_id: str) -> RunResult: ...
+    def run(self, run_id: str, only: Sequence[str] | None = None) -> RunResult:
+        """Run the pipeline (or just the ``only`` blocks) under Guardian run id ``run_id``."""
 
     @abc.abstractmethod
     def set_block_status(self, block: str, status: BlockStatus) -> None: ...
@@ -145,9 +146,9 @@ class StandaloneRunner(ScenarioRunner):
         with Guardian(spec, self.root, registry=registry) as g:
             yield g
 
-    def run(self, run_id: str) -> RunResult:
+    def run(self, run_id: str, only: Sequence[str] | None = None) -> RunResult:
         with self._acting_guardian() as g:
-            report = Executor(g).run(run_id)
+            report = Executor(g).run(run_id, only=only)
         return {r.block: BlockResult(r.outcome.value, r.sources) for r in report.blocks}
 
     def set_block_status(self, block: str, status: BlockStatus) -> None:
@@ -179,11 +180,14 @@ class DagsterRunner(ScenarioRunner):
                 raise AssertionError(f"dagster job {job_name} failed: {failures}")
             return result
 
-    def run(self, run_id: str) -> RunResult:
+    def run(self, run_id: str, only: Sequence[str] | None = None) -> RunResult:
+        import dagster as dg
+
         from guardian.adapters.dagster import PIPELINE_JOB
         from guardian.adapters.dagster.io_manager import RUN_ID_TAG
 
-        result = self._execute(PIPELINE_JOB, tags={RUN_ID_TAG: run_id})
+        selection = None if only is None else [dg.AssetKey(b) for b in only]
+        result = self._execute(PIPELINE_JOB, tags={RUN_ID_TAG: run_id}, asset_selection=selection)
         outcomes = {
             ev.asset_key.to_user_string(): ev.metadata["outcome"].value
             for ev in result.get_asset_check_evaluations()
@@ -193,6 +197,8 @@ class DagsterRunner(ScenarioRunner):
         )
         out: RunResult = {}
         for block in self.spec.blocks:
+            if only is not None and block.name not in only:
+                continue
             by_upstream = {e.data["upstream"]: e for e in resolved if e.block == block.name}
             sources = tuple(
                 DataRef(
@@ -223,4 +229,6 @@ class DagsterRunner(ScenarioRunner):
         snapshot = (
             DataRef(block, summary["snapshot_run_id"]) if summary["snapshot_run_id"] else None
         )
-        return ReplayResult(block, summary["replayed"], summary["still_failing"], snapshot)
+        return ReplayResult(
+            block, summary["replayed"], summary["still_failing"], snapshot, summary["merged"]
+        )

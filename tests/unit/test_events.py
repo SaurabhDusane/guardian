@@ -51,7 +51,15 @@ def test_sample_rate_zero_drops_routine_but_keeps_critical(tmp_path) -> None:
 
 
 def test_always_logged_set_matches_contract() -> None:
-    assert {k.value for k in ALWAYS_LOGGED} == {"ERROR", "ROLLBACK", "REROUTE", "QUARANTINE"}
+    # CLAUDE.md: ERROR/ROLLBACK/REROUTE/QUARANTINE are never sampled out. WARN joins them
+    # so warnings such as "replay merge skipped" cannot be sampled away.
+    assert {k.value for k in ALWAYS_LOGGED} == {
+        "WARN",
+        "ERROR",
+        "ROLLBACK",
+        "REROUTE",
+        "QUARANTINE",
+    }
 
 
 def test_partial_sampling_is_deterministic_with_seed(tmp_path) -> None:

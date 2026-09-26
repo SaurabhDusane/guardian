@@ -45,12 +45,23 @@ REGISTRY = {
 }
 
 
-def make_spec(threshold: float = 0.2, *, fallback: bool = True) -> PipelineSpec:
+def make_spec(
+    threshold: float = 0.2,
+    *,
+    fallback: bool = True,
+    merge_key: tuple[str, ...] | None = ("id",),
+) -> PipelineSpec:
     fallbacks = (FallbackEdge("b6", "b5", adapter="b5_to_b6_shape"),) if fallback else ()
     return PipelineSpec(
         name="test",
         blocks=(
-            BlockSpec("b1", fn="identity", schema="schema", quarantine_threshold=threshold),
+            BlockSpec(
+                "b1",
+                fn="identity",
+                schema="schema",
+                quarantine_threshold=threshold,
+                merge_key=merge_key,
+            ),
             BlockSpec("b5", fn="identity"),
             BlockSpec("b6", fn="identity", inputs=("b1",)),
             BlockSpec("b8", fn="identity", inputs=("b6",), fallbacks=fallbacks),

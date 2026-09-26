@@ -1,11 +1,14 @@
 # Demo pipeline: messy e-commerce orders -> daily revenue by region and segment.
 #
+# merge_key identifies a row across runs; replay upserts recovered rows by it.
+#
 # b8_aggregate normally reads b6_enrich. If b6 is DEGRADED (failed validation or
 # crashed) or taken OUT, b8 reads b5_normalize instead, reshaped by b5_to_b6_shape.
 name: demo
 blocks:
   - name: b1_ingest
     fn: demo.blocks:ingest
+    merge_key: [order_id]
     schema: demo.schemas:RawSchema
     quarantine_threshold: 0.2
     params:
@@ -15,36 +18,42 @@ blocks:
 
   - name: b2_parse
     fn: demo.blocks:parse
+    merge_key: [order_id]
     inputs: [b1_ingest]
     schema: demo.schemas:ParsedSchema
     quarantine_threshold: 0.2
 
   - name: b3_standardize
     fn: demo.blocks:standardize
+    merge_key: [order_id]
     inputs: [b2_parse]
     schema: demo.schemas:StandardizedSchema
     quarantine_threshold: 0.2
 
   - name: b4_clean
     fn: demo.blocks:clean
+    merge_key: [order_id]
     inputs: [b3_standardize]
     schema: demo.schemas:CleanSchema
     quarantine_threshold: 0.2
 
   - name: b5_normalize
     fn: demo.blocks:normalize
+    merge_key: [order_id]
     inputs: [b4_clean]
     schema: demo.schemas:NormalizedSchema
     quarantine_threshold: 0.1
 
   - name: b6_enrich
     fn: demo.blocks:enrich
+    merge_key: [order_id]
     inputs: [b5_normalize]
     schema: demo.schemas:EnrichedSchema
     quarantine_threshold: 0.1
 
   - name: b8_aggregate
     fn: demo.blocks:aggregate
+    merge_key: [order_date, region, segment]
     inputs: [b6_enrich]
     schema: demo.schemas:AggregateSchema
     quarantine_threshold: 0.0

@@ -75,7 +75,8 @@ uv run pytest                                  # unit tests + scenario suite
 `demo/pipeline.yaml` is looked up in the working directory first, then inside the
 installed package, so the command works from anywhere. Storage defaults to `./.guardian/`
 (use `--root` to change it). `guardian run` also takes `--run-id`, `--sample-rate`, and
-`--fault` for fault injection (see the walkthrough below).
+`--fault` for fault injection, and `--only BLOCK` to re-run selected blocks against the
+current last-good snapshots (see the walkthrough below).
 
 ### Dagster
 
@@ -90,7 +91,7 @@ In-process, from Python:
 from guardian.adapters.dagster.definitions import DEMO_SPEC, definitions_for
 from guardian.adapters.dagster.io_manager import RUN_ID_TAG
 
-defs = definitions_for(DEMO_SPEC, ".guardian")          # same YAML as the standalone runner
+defs = definitions_for(DEMO_SPEC, ".guardian")  # same YAML as the standalone runner
 result = defs.resolve_job_def("guardian_pipeline").execute_in_process(tags={RUN_ID_TAG: "d1"})
 for check in result.get_asset_check_evaluations():
     print(check.asset_key.to_user_string(), check.metadata["outcome"].value)
@@ -148,14 +149,26 @@ Every resolution emits a `RESOLVE` or `REROUTE` event naming the source actually
 **Recovery**
 
 - `replay(block)` re-runs the block's (fixed) function on its `QUARANTINED` records and
-  validates the result. Passing rows are appended to the last-good snapshot to form a
-  new, promoted snapshot, and those records are marked `REPLAYED`. Records are never
-  deleted. The result reports `replayed` and `still_failing`.
+  validates the result. Records whose rows now pass are marked `REPLAYED`; the rest stay
+  `QUARANTINED`. Records are never deleted. The result reports `replayed` and
+  `still_failing`. Where the recovered rows go depends on the block's `merge_key`:
+  - **With a `merge_key`** (for example `merge_key: [order_id]` in the YAML), the
+    recovered rows are *upserted* into a copy of the last-good snapshot. On a key
+    conflict the replayed row wins, and among replayed rows the newest quarantine record
+    wins. The result is written as a new snapshot and promoted to last-good, and the
+    block becomes `HEALTHY`.
+  - **Without one**, Guardian cannot tell a correction from a duplicate, so it does not
+    merge. The recovered rows are written to their own snapshot, last-good is left
+    unchanged, and a `WARN` event says the merge was skipped.
+- Replay is **idempotent**. It only consumes `QUARANTINED` records, so running it again
+  finds nothing to do and changes nothing. A replay that dies after writing its snapshot
+  but before marking records can simply be re-run: the keyed upsert produces the same
+  rows, not duplicates.
 - `set_block_status(block, HEALTHY | OUT)` is the human control. An `OUT` block is
   skipped and its consumers reroute. `DEGRADED` is only ever set by Guardian.
 
 **Events.** Structured JSON events go to `events.jsonl` and a DuckDB table. Routine
-events are sampled at `--sample-rate`, while `ERROR`, `ROLLBACK`, `REROUTE` and
+events are sampled at `--sample-rate`, while `WARN`, `ERROR`, `ROLLBACK`, `REROUTE` and
 `QUARANTINE` are always kept.
 
 ## Walkthrough: heavy corruption in b6 (scenario 3)
@@ -253,23 +266,51 @@ $ guardian status
 
 **4. Fix and replay.** The fault was only for that run, so the "fixed" b6 is simply the
 real one. Replay re-derives `region` and `segment` from the intact columns, and all 443
-records pass:
+records pass. b6 declares `merge_key: [order_id]`, so the recovered rows are upserted into
+b6's last-good snapshot (r1). r1 and r2 contain the same generated orders, so every
+recovered row replaces its r1 version, and the new snapshot has 443 rows with unique
+`order_id`s, not 886. A second replay has nothing left to do:
 
 ```
 $ guardian replay b6_enrich
-b6_enrich: replayed 443, still failing 0, new last-good snapshot replay-20260926T021231-f95dbb
+b6_enrich: replayed 443, still failing 0, upserted into new last-good snapshot replay-20260926T022345-5f3970
+
+$ guardian replay b6_enrich
+b6_enrich: replayed 0, still failing 0 (nothing to replay)
 
 $ guardian status
-┃ b6_enrich      │ HEALTHY │ replay-20260926T021231-f95dbb │ 0           │ 443      │
+┃ b6_enrich      │ HEALTHY │ replay-20260926T022345-5f3970 │ 0           │ 443      │
 ```
 
 b6 is `HEALTHY` again, with a new promoted snapshot. Its 443 records are still in
-quarantine, now marked `REPLAYED`. The next run takes the normal b6 → b8 path.
+quarantine, now marked `REPLAYED`.
 
-> **Note:** replay *appends* the recovered rows to the previous last-good snapshot. In
-> this demo, r1 and r2 contain the same generated orders, so b6's new snapshot holds both
-> copies. Deduplicating across runs is the block's job (or a future `merge_key` option);
-> Guardian guarantees only that no row is lost.
+**5. Refresh b8.** b8's r2 output was computed on the fallback path. Re-running just b8
+reads the recovered b6 snapshot, and the result is identical to the clean r1 aggregates:
+the same 130 rows with the same values. The scenario suite asserts this under both runners
+(`test_b8_after_replay_matches_clean_run`).
+
+```
+$ guardian run demo/pipeline.yaml --run-id r3 --only b8_aggregate
+┏━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━┓
+┃ block        ┃ outcome ┃ status  ┃ rows in ┃ promoted ┃ quarantined ┃ read from                               ┃ note ┃
+┡━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━┩
+│ b8_aggregate │ PASS    │ HEALTHY │     443 │      130 │           0 │ b6_enrich@replay-20260926T022345-5f3970 │      │
+└──────────────┴─────────┴─────────┴─────────┴──────────┴─────────────┴─────────────────────────────────────────┴──────┘
+```
+
+> **Note: replay needs a `merge_key` to merge.** Without one, replay does not append
+> (appending would have duplicated all 443 orders here). It writes the recovered rows to
+> a separate snapshot, leaves last-good alone, and warns:
+>
+> ```
+> $ guardian replay b6_enrich
+> b6_enrich: replayed 443, still failing 0
+> WARN: no merge_key declared; replayed rows written to separate snapshot replay-20260926T022401-2c26b9, last-good unchanged
+> ```
+>
+> The matching `WARN` event, which is never sampled out, records the snapshot name and the
+> unchanged last-good run. Every demo block declares a `merge_key`.
 
 The same scenario runs under Dagster in `tests/scenarios` (`test_b6_heavy_corruption[dagster]`).
 There, b6's `guardian_validation` check fails with `outcome=ROLLBACK`, and b8's input is
@@ -318,10 +359,12 @@ rolled back or skipped. The truth is carried by the `guardian_validation` asset 
 `guardian_action` output metadata. This is a deliberate trade: the pipeline keeps flowing,
 and the UI still shows exactly which block is degraded and why.
 
-### The no-silent-loss invariant
+### The no-silent-loss invariant (exactly once)
 
 > Every row handed to `on_output` ends up in exactly one place: the promoted snapshot for
-> that run, or quarantine.
+> that run, or quarantine. After a replay, a `REPLAYED` row is held by the replay
+> snapshot its record points at. So at any moment each input row is held exactly once,
+> across promoted snapshots plus un-replayed quarantine.
 
 Guardian can only be trusted to act automatically if it never makes data disappear. Two
 design choices follow from the invariant:
@@ -331,16 +374,25 @@ design choices follow from the invariant:
   Replay brings them back.
 - **Quarantine is append-only.** Replay changes a record's status from `QUARANTINED` to
   `REPLAYED` and never deletes it, so every recovery can be audited.
+- **Replay merges by key or not at all.** Appending recovered rows to a snapshot that
+  may already hold an earlier version of the same row would satisfy "no loss" but break
+  "exactly once". Upserting by `merge_key` satisfies both, and it also makes replay
+  idempotent.
 
 The invariant is tested at three levels:
 
-- **Property test:** a hypothesis test (`tests/unit/test_invariant.py`) generates random
-  frames with random bad rows, NaNs, text that can't be converted, repeated index labels
-  and missing columns, across thresholds. It checks that the promoted plus quarantined
-  row ids exactly equal the input ids.
+- **Property tests** (`tests/unit/test_invariant.py`, hypothesis) generate random frames
+  with random bad rows, NaNs, text that can't be converted, repeated index labels and
+  missing columns, across thresholds.
+  - The first test checks that the promoted plus quarantined row ids exactly equal the
+    input ids.
+  - The second then fixes the block and replays twice, with and without a `merge_key`,
+    and with and without an earlier run to merge into. After every step, each input id
+    of each run must be held exactly once. The second replay must not write anything.
 - **Per-block check in every scenario:** for each block, rows handed over = promoted +
   quarantined. This is read back from the stored events, snapshots and quarantine, so it
-  does not trust the runner's own report.
+  does not trust the runner's own report. A second check, by `merge_key`, confirms that
+  no row is held twice, including rows that were replayed.
 - **Chain checks in every scenario:** for row-wise blocks, the rows a block received
   equal the rows of the snapshot it read. End to end, every ingested row is either in
   the final snapshot or quarantined somewhere upstream.

@@ -7,6 +7,7 @@ module only sequences blocks and records what happened.
 from __future__ import annotations
 
 import time
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -66,12 +67,23 @@ class Executor:
         self.guardian = guardian
         self.order = topological_order(guardian.spec)
 
-    def run(self, run_id: str | None = None) -> RunReport:
+    def run(self, run_id: str | None = None, only: Collection[str] | None = None) -> RunReport:
+        """Run every block, or just the blocks in ``only`` (in topological order).
+
+        Unselected blocks are not executed; selected blocks read their inputs' last-good
+        snapshots as usual (e.g. to refresh b8 after replaying b6).
+        """
         g = self.guardian
         run_id = run_id or new_run_id()
+        selected = list(self.order)
+        if only is not None:
+            unknown = sorted(set(only) - set(self.order))
+            if unknown:
+                raise KeyError(f"unknown block(s) {unknown}")
+            selected = [b for b in self.order if b in set(only)]
         report = RunReport(run_id=run_id, pipeline=g.spec.name)
         g.events.emit(EventKind.RUN_STARTED, run_id=run_id, pipeline=g.spec.name)
-        for block in self.order:
+        for block in selected:
             report.blocks.append(self._run_one(block, run_id))
         g.events.emit(
             EventKind.RUN_FINISHED,

@@ -82,10 +82,22 @@ class BlockSpec:
     fallbacks: tuple[FallbackEdge, ...] = ()
     # Extra keyword arguments passed to ``fn`` (e.g. loader settings for a source block).
     params: Mapping[str, Any] = field(default_factory=dict, hash=False)
+    # Columns identifying a row across runs. Replay upserts recovered rows into the
+    # last-good snapshot by this key; without it, replay never merges.
+    merge_key: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         validate_name(self.name, "block name")
         object.__setattr__(self, "params", MappingProxyType(dict(self.params)))
+        if self.merge_key is not None:
+            key = tuple(self.merge_key)
+            if not key or not all(isinstance(c, str) and c for c in key):
+                raise ValueError(
+                    f"block {self.name!r}: merge_key must be a non-empty list of column names"
+                )
+            if len(set(key)) != len(key):
+                raise ValueError(f"block {self.name!r}: duplicate columns in merge_key {list(key)}")
+            object.__setattr__(self, "merge_key", key)
         # Allow lists from callers/YAML while keeping the dataclass hashable.
         object.__setattr__(self, "inputs", tuple(self.inputs))
         object.__setattr__(self, "fallbacks", tuple(self.fallbacks))
@@ -202,10 +214,18 @@ class QuarantineRecord:
 
 @dataclass(frozen=True)
 class ReplayResult:
+    """Outcome of a replay.
+
+    ``snapshot`` is the snapshot the recovered rows were written to. ``merged`` is True
+    when they were upserted into a new last-good snapshot (the block has a merge_key),
+    False when they were written to a separate, unpromoted snapshot.
+    """
+
     block: str
     replayed: int
     still_failing: int
     snapshot: DataRef | None = None
+    merged: bool = False
 
 
 @dataclass(frozen=True)

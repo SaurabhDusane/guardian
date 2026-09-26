@@ -97,3 +97,11 @@ def test_run_context_defaults() -> None:
     assert isinstance(RunContext("r2", storage_root="x").storage_root, Path)  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         RunContext(run_id="bad/id")
+
+
+def test_merge_key_validation() -> None:
+    assert BlockSpec("b", "m:f", merge_key=["a", "b"]).merge_key == ("a", "b")  # type: ignore[arg-type]
+    assert BlockSpec("b", "m:f").merge_key is None
+    for bad in [(), ("a", "a"), ("",)]:
+        with pytest.raises(ValueError, match="merge_key"):
+            BlockSpec("b", "m:f", merge_key=bad)

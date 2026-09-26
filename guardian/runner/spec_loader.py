@@ -11,7 +11,16 @@ import yaml
 from guardian.core.models import BlockSpec, FallbackEdge, PipelineSpec
 
 _PIPELINE_KEYS = {"name", "blocks"}
-_BLOCK_KEYS = {"name", "fn", "inputs", "schema", "quarantine_threshold", "fallbacks", "params"}
+_BLOCK_KEYS = {
+    "name",
+    "fn",
+    "inputs",
+    "schema",
+    "quarantine_threshold",
+    "fallbacks",
+    "params",
+    "merge_key",
+}
 _FALLBACK_KEYS = {"replaces", "source", "adapter"}
 
 
@@ -73,6 +82,11 @@ def _parse_block(raw: Mapping[str, Any], where: str) -> BlockSpec:
     params = raw.get("params") or {}
     if not isinstance(params, Mapping):
         raise SpecError(f"{where}: 'params' must be a mapping")
+    merge_key = raw.get("merge_key")
+    if merge_key is not None and (
+        not isinstance(merge_key, list) or not all(isinstance(c, str) for c in merge_key)
+    ):
+        raise SpecError(f"{where}: 'merge_key' must be a list of column names")
     fallbacks_raw = raw.get("fallbacks") or []
     if not isinstance(fallbacks_raw, list):
         raise SpecError(f"{where}: 'fallbacks' must be a list")
@@ -89,6 +103,7 @@ def _parse_block(raw: Mapping[str, Any], where: str) -> BlockSpec:
             quarantine_threshold=float(threshold),
             fallbacks=fallbacks,
             params=dict(params),
+            merge_key=tuple(merge_key) if merge_key is not None else None,
         )
     except ValueError as exc:
         if isinstance(exc, SpecError):

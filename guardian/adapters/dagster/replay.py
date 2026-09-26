@@ -25,6 +25,7 @@ def build_replay_job() -> dg.JobDefinition:
             "replayed": result.replayed,
             "still_failing": result.still_failing,
             "snapshot_run_id": result.snapshot.run_id if result.snapshot else None,
+            "merged": result.merged,
         }
         context.add_output_metadata({k: v if v is not None else "" for k, v in summary.items()})
         return summary

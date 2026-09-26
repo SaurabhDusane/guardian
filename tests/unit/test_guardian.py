@@ -279,6 +279,164 @@ def test_replay_nothing_quarantined(guardian) -> None:
     assert (result.replayed, result.still_failing, result.snapshot) == (0, 0, None)
 
 
+# ---------------------------------------------------------------- idempotent replay
+
+
+def _state(g: Guardian, block: str = "b1") -> tuple:
+    """Everything a replay could change."""
+    return (
+        g.snapshots.list_runs(block),
+        g.snapshots.last_good(block),
+        g.status(block),
+        [(r.id, r.status, r.replay_run_id) for r in g.quarantine.list(block=block)],
+        len(g.events.query()),
+    )
+
+
+def _ids(df: pd.DataFrame) -> list[int]:
+    return sorted(df["id"].tolist())
+
+
+def test_replay_upserts_by_merge_key(tmp_path) -> None:
+    with Guardian(make_spec(threshold=0.5), tmp_path, registry=REGISTRY) as g:
+        g.on_output("b1", "r1", frame([1.0, -2.0, 3.0, -4.0]))
+        g.registry["identity"] = REGISTRY["fix_amount"]
+        result = g.replay("b1", run_id="replay-1")
+        assert result.merged and result.replayed == 2
+        merged = g.read(g.snapshots.last_good("b1"))
+        assert _ids(merged) == [0, 1, 2, 3]  # each key exactly once
+        assert merged.set_index("id")["amount"].to_dict() == {0: 1.0, 1: 2.0, 2: 3.0, 3: 4.0}
+
+
+def test_replayed_row_wins_key_conflict(tmp_path) -> None:
+    with Guardian(make_spec(threshold=0.5), tmp_path, registry=REGISTRY) as g:
+        g.on_output("b1", "r1", frame([1.0]))  # id 0 -> 1.0, last-good
+        g.on_output("b1", "r2", frame([-5.0]))  # id 0 again, rolled back
+        assert g.snapshots.last_good("b1").run_id == "r1"
+        g.registry["identity"] = REGISTRY["fix_amount"]
+        g.replay("b1", run_id="replay-1")
+        merged = g.read(g.snapshots.last_good("b1"))
+        assert merged["id"].tolist() == [0]
+        assert merged["amount"].tolist() == [5.0]
+
+
+def test_newest_quarantine_record_wins_among_recovered(tmp_path) -> None:
+    with Guardian(make_spec(threshold=0.5), tmp_path, registry=REGISTRY) as g:
+        g.on_output("b1", "r1", frame([-5.0]))
+        g.on_output("b1", "r2", frame([-7.0]))
+        g.registry["identity"] = REGISTRY["fix_amount"]
+        result = g.replay("b1")
+        assert result.replayed == 2  # both records are resolved...
+        merged = g.read(result.snapshot)
+        assert merged["amount"].tolist() == [7.0]  # ...by the newest version of key 0
+        assert g.quarantine.count(status=QuarantineStatus.QUARANTINED) == 0
+
+
+def test_multi_column_merge_key(tmp_path) -> None:
+    spec = make_spec(threshold=0.5, merge_key=("id", "amount"))
+    with Guardian(spec, tmp_path, registry=REGISTRY) as g:
+        g.on_output("b1", "r1", frame([1.0, -1.0]))
+        g.registry["identity"] = REGISTRY["fix_amount"]
+        g.replay("b1")
+        merged = g.read(g.snapshots.last_good("b1"))
+        assert sorted(zip(merged["id"], merged["amount"], strict=True)) == [(0, 1.0), (1, 1.0)]
+
+
+def test_second_replay_is_a_noop(tmp_path) -> None:
+    with Guardian(make_spec(threshold=0.5), tmp_path, registry=REGISTRY) as g:
+        g.on_output("b1", "r1", frame([1.0, -2.0, 3.0, -4.0]))
+        g.registry["identity"] = REGISTRY["fix_amount"]
+        g.replay("b1")
+        before = _state(g)
+        result = g.replay("b1")
+        assert (result.replayed, result.still_failing, result.snapshot) == (0, 0, None)
+        assert _state(g) == before
+
+
+def test_second_replay_with_still_failing_rows_changes_nothing(tmp_path) -> None:
+    def fix_small(df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        out.loc[out["amount"] > -3, "amount"] = out["amount"].abs()
+        return out
+
+    with Guardian(make_spec(threshold=1.0), tmp_path, registry=REGISTRY) as g:
+        g.on_output("b1", "r1", frame([1.0, -2.0, -5.0]))
+        g.registry["identity"] = fix_small
+        first = g.replay("b1")
+        assert (first.replayed, first.still_failing) == (1, 1)
+        snapshots, last_good, status, records, _ = _state(g)
+        second = g.replay("b1")
+        assert (second.replayed, second.still_failing, second.snapshot) == (0, 1, None)
+        assert _state(g)[:4] == (snapshots, last_good, status, records)
+
+
+def test_replay_interrupted_before_marking_converges(tmp_path, monkeypatch) -> None:
+    """A replay that dies after writing its snapshot can simply be re-run."""
+    with Guardian(make_spec(threshold=0.5), tmp_path, registry=REGISTRY) as g:
+        g.on_output("b1", "r1", frame([1.0, -2.0, 3.0, -4.0]))
+        g.registry["identity"] = REGISTRY["fix_amount"]
+        real = g.quarantine.mark_replayed
+
+        def dies(*args, **kwargs):
+            raise RuntimeError("power cut")
+
+        monkeypatch.setattr(g.quarantine, "mark_replayed", dies)
+        with pytest.raises(RuntimeError):
+            g.replay("b1", run_id="replay-1")
+        monkeypatch.setattr(g.quarantine, "mark_replayed", real)
+        g.replay("b1", run_id="replay-2")
+        merged = g.read(g.snapshots.last_good("b1"))
+        assert g.snapshots.last_good("b1").run_id == "replay-2"
+        assert _ids(merged) == [0, 1, 2, 3]  # no duplicates from the half-done replay
+
+
+def test_replay_without_merge_key_writes_separate_snapshot_and_warns(tmp_path) -> None:
+    with Guardian(make_spec(threshold=0.2, merge_key=None), tmp_path, registry=REGISTRY) as g:
+        g.on_output("b1", "r1", frame([1.0, 2.0, 3.0]))
+        g.on_output("b1", "r2", frame([-1.0, -2.0]))  # rollback -> DEGRADED
+        g.registry["identity"] = REGISTRY["fix_amount"]
+        result = g.replay("b1", run_id="replay-1")
+
+        assert not result.merged and result.replayed == 2
+        assert result.snapshot.run_id == "replay-1"
+        # last-good untouched; replayed rows live in their own snapshot
+        assert g.snapshots.last_good("b1").run_id == "r1"
+        assert _ids(g.snapshots.read("b1", "r1")) == [0, 1, 2]
+        assert g.snapshots.read("b1", "replay-1")["amount"].tolist() == [1.0, 2.0]
+        assert g.status("b1") is BlockStatus.DEGRADED
+        assert g.quarantine.count(status=QuarantineStatus.REPLAYED) == 2
+        (warn,) = g.events.query(kind=EventKind.WARN, block="b1")
+        assert "merge skipped" in warn.data["message"]
+        assert warn.data["snapshot_run_id"] == "replay-1"
+        # and a second replay is a no-op here too
+        before = _state(g)
+        assert g.replay("b1").snapshot is None
+        assert _state(g) == before
+
+
+def test_warn_event_survives_zero_sample_rate(tmp_path) -> None:
+    from guardian.core.events import EventLogger
+
+    events = EventLogger(tmp_path, sample_rate=0.0)
+    spec = make_spec(threshold=1.0, merge_key=None)
+    with Guardian(spec, tmp_path, registry=REGISTRY, events=events) as g:
+        g.on_output("b1", "r1", frame([-1.0]))
+        g.registry["identity"] = REGISTRY["fix_amount"]
+        g.replay("b1")
+        assert len(g.events.query(kind=EventKind.WARN)) == 1
+
+
+def test_replay_with_missing_merge_key_column_changes_nothing(tmp_path) -> None:
+    with Guardian(make_spec(threshold=1.0, merge_key=("nope",)), tmp_path, registry=REGISTRY) as g:
+        g.on_output("b1", "r1", frame([1.0, -1.0]))
+        g.registry["identity"] = REGISTRY["fix_amount"]
+        before = _state(g)[:4]
+        result = g.replay("b1")
+        assert (result.replayed, result.still_failing) == (0, 1)
+        assert _state(g)[:4] == before
+        assert "merge_key" in g.events.query(kind=EventKind.ERROR, block="b1")[-1].data["error"]
+
+
 # ---------------------------------------------------------------- refs
 
 

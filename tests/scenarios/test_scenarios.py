@@ -1,5 +1,6 @@
 """Fault-injection scenarios, run against every runner in conftest.RUNNERS."""
 
+import pandas as pd
 import pytest
 
 from guardian.core.events import EventKind
@@ -204,6 +205,13 @@ def test_replay_after_fixing_b6(runner: ScenarioRunner) -> None:
     assert len(replayed) == result.replayed
     assert_no_silent_loss(runner, "r1")
 
+    # replaying again is a no-op
+    before = (runner.last_good("b6_enrich"), runner.quarantine(block="b6_enrich"))
+    again = runner.replay("b6_enrich")
+    assert (again.replayed, again.still_failing, again.snapshot) == (0, 0, None)
+    assert (runner.last_good("b6_enrich"), runner.quarantine(block="b6_enrich")) == before
+    assert_no_silent_loss(runner, "r1")
+
     # the next run takes the normal path again
     result = runner.run("r2")
     assert_normal_path(runner, result, "r2")
@@ -217,8 +225,10 @@ def test_replay_merges_with_previous_last_good(runner: ScenarioRunner) -> None:
     before = runner.read_last_good("b6_enrich")
     runner.clear_faults()
     result = runner.replay("b6_enrich")
-    assert (result.replayed, result.still_failing) == (10, 0)
-    assert len(runner.read_last_good("b6_enrich")) == len(before) + 10
+    assert (result.replayed, result.still_failing) == (10, 0) and result.merged
+    after = runner.read_last_good("b6_enrich")
+    assert len(after) == len(before) + 10 == ROWS
+    assert after["order_id"].is_unique
     assert_no_silent_loss(runner, "r2")
 
 
@@ -229,3 +239,49 @@ def test_replay_while_still_broken_changes_nothing(runner: ScenarioRunner) -> No
     assert (result.replayed, result.still_failing) == (0, ROWS)
     assert runner.quarantine(status=QuarantineStatus.REPLAYED) == []
     assert runner.last_good("b6_enrich") is None
+
+
+# ---------------------------------------------------------------- 7
+
+
+def _sorted(df):
+    return df.sort_values(["order_date", "region", "segment"], ignore_index=True)
+
+
+@pytest.mark.parametrize("prior_clean_run", [False, True], ids=["first_run", "after_clean_run"])
+def test_b8_after_replay_matches_clean_run(
+    runner: ScenarioRunner, tmp_path, prior_clean_run: bool
+) -> None:
+    """Outage in b6, fix, replay, refresh b8: aggregates equal an uninterrupted run."""
+    clean = type(runner)(runner.spec, tmp_path / "clean")
+    clean.run("c1")
+    expected = _sorted(clean.snapshot("b8_aggregate", "c1"))
+    clean.close()
+
+    if prior_clean_run:
+        runner.run("r0")
+    runner.inject_fault("b6_enrich", corrupt_rows(0.5, columns=["region", "segment"], seed=2))
+    result = runner.run("r1")
+    assert result["b8_aggregate"].rerouted
+    degraded = runner.snapshot("b8_aggregate", "r1")
+    assert set(degraded["segment"]) == {"unassigned"}  # the outage is visible in b8
+
+    runner.clear_faults()
+    replay = runner.replay("b6_enrich")
+    assert (replay.replayed, replay.still_failing, replay.merged) == (ROWS, 0, True)
+    b6 = runner.read_last_good("b6_enrich")
+    assert len(b6) == ROWS and b6["order_id"].is_unique  # upserted, not appended
+
+    # Recompute only b8 from the recovered b6 (no re-ingest).
+    result = runner.run("r2", only=["b8_aggregate"])
+    assert list(result) == ["b8_aggregate"]
+    (ref,) = result["b8_aggregate"].sources
+    assert (ref.block, ref.run_id, ref.stale) == ("b6_enrich", replay.snapshot.run_id, False)
+    pd.testing.assert_frame_equal(_sorted(runner.snapshot("b8_aggregate", "r2")), expected)
+
+    # A second replay changes nothing, so a second refresh gives the same answer.
+    assert runner.replay("b6_enrich").snapshot is None
+    runner.run("r3", only=["b8_aggregate"])
+    pd.testing.assert_frame_equal(_sorted(runner.snapshot("b8_aggregate", "r3")), expected)
+    for run_id in ["r1", "r2", "r3"]:
+        assert_no_silent_loss(runner, run_id)

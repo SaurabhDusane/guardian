@@ -361,12 +361,21 @@ class Guardian:
     def replay(self, block: str, run_id: str | None = None) -> ReplayResult:
         """Re-run ``block``'s function on its QUARANTINED records.
 
-        Rows whose output passes validation are merged with the block's last-good
-        snapshot into a new last-good snapshot and marked REPLAYED; the rest stay
-        QUARANTINED. The block function must preserve the index (row-wise
-        transforms do), which is how output rows map back to quarantine records.
+        Rows whose output passes validation are "recovered" and their records marked
+        REPLAYED; the rest stay QUARANTINED. The block function must preserve the index
+        (row-wise transforms do), which is how output rows map back to records.
+
+        - With a ``merge_key``: recovered rows are upserted into a copy of the last-good
+          snapshot (recovered rows win on key conflict; among recovered rows the newest
+          quarantine record wins). The result is written and promoted to last-good.
+        - Without one: nothing is merged. Recovered rows are written to their own
+          snapshot, last-good is left alone, and a WARN event is emitted.
+
+        Idempotent: only QUARANTINED records are replayed, so a second call finds
+        nothing to do and changes nothing. If a replay dies after writing its snapshot
+        but before marking records, re-running it upserts the same keys again.
         """
-        self.spec.block(block)
+        spec = self.spec.block(block)
         run_id = run_id or new_run_id("replay")
         validate_name(run_id, "run_id")
         ids, frame = self.quarantine.load_frame(block)
@@ -386,41 +395,67 @@ class Guardian:
                 raise TypeError(f"block {block!r} returned {type(out).__name__}, not DataFrame")
             result = self.validator_for(block).validate(out[out.index.isin(ids)])
         except Exception as exc:
-            self.events.emit(
-                EventKind.ERROR,
-                block=block,
-                run_id=run_id,
-                phase="replay",
-                error=f"{type(exc).__name__}: {exc}",
-            )
-            return self._replay_done(block, run_id, [], len(ids), None)
-
+            return self._replay_failed(block, run_id, len(ids), f"{type(exc).__name__}: {exc}")
         if result.schema_error is not None:
-            self.events.emit(
-                EventKind.ERROR,
-                block=block,
-                run_id=run_id,
-                phase="replay",
-                error=result.schema_error,
-            )
-            return self._replay_done(block, run_id, [], len(ids), None)
+            return self._replay_failed(block, run_id, len(ids), result.schema_error)
 
         bad_ids = set(result.bad.index)
         passing = [i for i in dict.fromkeys(result.good.index) if i not in bad_ids]
         if not passing:
             return self._replay_done(block, run_id, [], len(ids), None)
 
-        replayed_rows = result.good[result.good.index.isin(passing)]
+        recovered = result.good[result.good.index.isin(passing)].sort_index()
         if base is not None:
-            replayed_rows = restore_dtypes(replayed_rows, dict(base.dtypes))
-        merged = pd.concat(
-            [*([base] if base is not None else []), replayed_rows], ignore_index=True
-        )
-        ref = self.snapshots.write(block, run_id, merged)
-        self.snapshots.mark_last_good(block, run_id)
+            recovered = restore_dtypes(recovered, dict(base.dtypes))
+
+        key = list(spec.merge_key or ())
+        missing = [
+            c
+            for c in key
+            if c not in recovered.columns or (base is not None and c not in base.columns)
+        ]
+        if missing:
+            return self._replay_failed(
+                block, run_id, len(ids), f"merge_key column(s) {missing} not in the block output"
+            )
+
+        if key:
+            # Newest record wins among recovered rows (index = quarantine id, ascending).
+            recovered = recovered.drop_duplicates(subset=key, keep="last")
+            parts = [recovered.reset_index(drop=True)]
+            if base is not None:
+                replaced = pd.MultiIndex.from_frame(base[key]).isin(
+                    pd.MultiIndex.from_frame(recovered[key])
+                )
+                parts.insert(0, base.loc[~replaced].reset_index(drop=True))
+            ref = self.snapshots.write(block, run_id, pd.concat(parts, ignore_index=True))
+            self.snapshots.mark_last_good(block, run_id)
+        else:
+            ref = self.snapshots.write(block, run_id, recovered.reset_index(drop=True))
+            self.events.emit(
+                EventKind.WARN,
+                block=block,
+                run_id=run_id,
+                phase="replay",
+                message=(
+                    f"merge skipped: block {block!r} declares no merge_key, so "
+                    f"{len(recovered)} replayed rows were written to snapshot {run_id!r} "
+                    "and not merged into the last-good snapshot"
+                ),
+                snapshot_run_id=run_id,
+                last_good_run_id=base_ref.run_id if base_ref else None,
+            )
+
         changed = self.quarantine.mark_replayed(passing, replay_run_id=run_id)
-        self._mark_after_run(block, BlockStatus.HEALTHY, run_id)
-        return self._replay_done(block, run_id, passing, len(ids) - changed, ref, changed)
+        if key:
+            self._mark_after_run(block, BlockStatus.HEALTHY, run_id)
+        return self._replay_done(
+            block, run_id, passing, len(ids) - changed, ref, changed, merged=bool(key)
+        )
+
+    def _replay_failed(self, block: str, run_id: str, n: int, error: str) -> ReplayResult:
+        self.events.emit(EventKind.ERROR, block=block, run_id=run_id, phase="replay", error=error)
+        return self._replay_done(block, run_id, [], n, None)
 
     def _replay_done(
         self,
@@ -430,6 +465,8 @@ class Guardian:
         still_failing: int,
         ref: DataRef | None,
         replayed: int | None = None,
+        *,
+        merged: bool = False,
     ) -> ReplayResult:
         replayed = len(passing) if replayed is None else replayed
         self.events.emit(
@@ -439,8 +476,9 @@ class Guardian:
             replayed=replayed,
             still_failing=still_failing,
             snapshot_run_id=ref.run_id if ref else None,
+            merged=merged,
         )
-        return ReplayResult(block, replayed, still_failing, ref)
+        return ReplayResult(block, replayed, still_failing, ref, merged)
 
 
 def _as_validator(schema: Any) -> Validator:
