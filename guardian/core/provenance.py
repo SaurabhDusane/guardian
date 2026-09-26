@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,6 +24,7 @@ from typing import Any, Protocol, runtime_checkable
 
 import duckdb
 
+from guardian.core.dbfile import DuckDBFile
 from guardian.core.models import Quality, validate_name
 
 QUALITY_COL = "_guardian_quality"
@@ -196,11 +198,16 @@ class DuckDBProvenanceStore:
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
         self.path = root / filename
+        self._db = DuckDBFile(self.path)
         with self._connect() as con:
             con.execute(_SCHEMA)
 
-    def _connect(self) -> duckdb.DuckDBPyConnection:
-        return duckdb.connect(str(self.path))
+    def _connect(self) -> AbstractContextManager[duckdb.DuckDBPyConnection]:
+        return self._db.connect()
+
+    def session(self) -> AbstractContextManager[None]:
+        """Share one connection for a unit of work (see core/dbfile.py)."""
+        return self._db.session()
 
     def record(self, provenance: Provenance) -> None:
         p = provenance

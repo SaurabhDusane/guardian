@@ -14,11 +14,11 @@ from hypothesis import strategies as st
 from guardian.core.models import BlockStatus, Quality
 from guardian.demo.faults import crash
 
-from ..helpers.roles import dependents, descendants, representative
+from ..helpers.roles import dependents, descendants, representative, role_params
 from .test_scenarios import ROLES, SPEC, check_invariants, corrupt
 from .test_shadow import versioned
 
-by_role = pytest.mark.parametrize("role", ROLES)
+by_role = pytest.mark.parametrize("role", role_params(ROLES))
 FRESH, STALE, FALLBACK = Quality.FRESH.value, Quality.STALE.value, Quality.FALLBACK.value
 
 
@@ -202,13 +202,29 @@ def _independent_impact(records, block: str) -> set[tuple[str, str]]:
     return {(p.block, p.run_id) for sid, p in by_id.items() if touches(sid)}
 
 
-@settings(
-    max_examples=6,
-    deadline=None,
-    suppress_health_check=[HealthCheck.function_scoped_fixture, HealthCheck.too_slow],
-)
+def _8f_settings(examples: int):
+    return settings(
+        max_examples=examples,
+        deadline=None,
+        suppress_health_check=[HealthCheck.function_scoped_fixture, HealthCheck.too_slow],
+    )
+
+
+@pytest.mark.slow
+@_8f_settings(6)
 @given(data=st.data())
 def test_8f_impact_matches_an_independent_computation(runner, data) -> None:
+    check_8f(runner, data)
+
+
+@_8f_settings(2)
+@given(data=st.data())
+def test_8f_impact_matches_an_independent_computation_quick(runner, data) -> None:
+    """The same property, fewer examples (the default run); the full run has 6."""
+    check_8f(runner, data)
+
+
+def check_8f(runner, data) -> None:
     blocks = list(SPEC.block_names)
     plan = [
         data.draw(

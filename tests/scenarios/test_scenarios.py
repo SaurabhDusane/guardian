@@ -13,14 +13,14 @@ from guardian.core.models import BlockStatus, QuarantineStatus
 from guardian.demo.faults import corrupt_rows, crash, schema_drift
 
 from ..helpers.profile import block_profiles
-from ..helpers.roles import dependents, descendants, present_roles, representative
+from ..helpers.roles import dependents, descendants, present_roles, representative, role_params
 from .invariants import assert_end_to_end_accounting, assert_no_silent_loss
 from .runners import BlockResult, ScenarioRunner, scenario_spec
 
 SPEC = scenario_spec()
 ROLES = present_roles(SPEC)
 PROFILES = block_profiles(SPEC)
-by_role = pytest.mark.parametrize("role", ROLES)
+by_role = pytest.mark.parametrize("role", role_params(ROLES))
 
 
 # ---------------------------------------------------------------- helpers

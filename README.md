@@ -79,7 +79,7 @@ uv run guardian shadow start b6_enrich v2      # shadow a new version of any blo
 uv run guardian shadow status                  # ...then promote / rollback / stop
 uv run guardian impact b5_normalize            # what did a degraded block touch?
 uv run guardian lineage b8_aggregate <run_id>  # where did a snapshot come from?
-uv run pytest                                  # unit tests + scenario suite
+uv run pytest                                  # fast default test suite (see Development)
 ```
 
 `demo/pipeline.yaml` is looked up in the working directory first, then inside the
@@ -92,7 +92,7 @@ current last-good snapshots (see the walkthrough below).
 
 ```bash
 uv sync --extra dagster                        # or: uv pip install -e ".[dagster]"
-uv run pytest                                  # scenario suite now also runs under Dagster
+uv run pytest -m dagster                       # the scenario suite under Dagster (slow)
 ```
 
 In-process, from Python:
@@ -1372,6 +1372,55 @@ with the min to max range. Full details, machine specs and raw samples are in
   At this event volume the sample rate hardly matters; it would start to matter only with
   far more blocks or with per-row events.
 
+## Development
+
+```bash
+uv sync --extra dagster --extra agent --extra observability   # everything the tests use
+uv run ruff check . && uv run ruff format --check .           # lint and format
+```
+
+Tests are split by markers (declared in `pyproject.toml`):
+
+| marker | what | in the default run? |
+|---|---|---|
+| `slow` | Dagster runner scenarios, every role and block beyond the representative one, full property-test example counts, the eval matrix, the benchmark smoke run | no |
+| `dagster` | needs the `dagster` extra (every Dagster runner test is also `slow`) | no |
+| `llm` | calls a real LLM API (network, API key, and `GUARDIAN_LLM_LIVE=1`) | no |
+| `docker` | needs Docker (the local observability stack) | no |
+
+| command | runs |
+|---|---|
+| `uv run pytest` | the default suite: `-m "not slow and not llm and not docker"` |
+| `uv run pytest -n auto` | the same, in parallel (pytest-xdist) |
+| `uv run pytest -m "not llm and not docker" -n auto` | the **full suite**: both runners, every DAG role and block, full property tests, eval matrix |
+| `uv run pytest -m slow` | only the slow tests |
+| `uv run pytest -m dagster` | only the Dagster tests |
+| `GUARDIAN_LLM_LIVE=1 GUARDIAN_LLM_PROVIDER=anthropic GUARDIAN_LLM_MODEL=... ANTHROPIC_API_KEY=... uv run pytest -m llm` | the real-model contract test |
+| `uv run pytest -m docker` | the Docker stack tests (the stack test skips without a daemon) |
+
+A later `-m` replaces the default one.
+
+**Coverage in the default run.** Role- and block-parametrized tests keep one
+representative there: the `fallback_protected` role, or its block. The other roles and
+blocks run in the full suite. `tests/scenarios/test_smoke.py` runs a contain → replay
+→ recover scenario for **every** DAG role, standalone, so the default run still
+exercises every role. The Hypothesis property tests run with fewer examples by default
+and with the full count in the full suite. Every test has its own storage root
+(`tmp_path`), so `-n auto` is safe.
+
+Timings on a 4-CPU container:
+
+| suite | serial | `-n auto` |
+|---|---|---|
+| default (459 tests) | 4 min 48 s | 1 min 44 s |
+| full (798 tests) | 30 min 17 s | 10 min 51 s |
+| before this split (788 tests, all serial) | 41 min 04 s | n/a |
+
+In the full suite, Dagster's in-process execution dominates: about 1.9 s per pipeline
+run, against 0.5 s standalone. Details are in
+[bench/test_timings_before.md](bench/test_timings_before.md) and
+[bench/test_timings_after.md](bench/test_timings_after.md).
+
 ## Project layout
 
 ```
@@ -1390,6 +1439,7 @@ bench/
   run_bench.py throughput / recovery / overhead benchmarks -> bench/results.md
   agent_eval.md  written by `guardian eval diagnose` (real model; manual)
   agent_fix_eval.md  written by `guardian eval fix` (real model; manual)
+  test_timings_before.md / test_timings_after.md  test suite profiling (Phase 13)
 tests/
   helpers/     blocks_by_role (DAG roles) and block profiles, shared by the tests
   unit/        per-module core tests, invariant property test, layering test, role helper
@@ -1399,5 +1449,5 @@ tests/
   agent/       evidence, diagnosis validation and clients, eval (FakeClient only)
   observability/  OpenLineage and OpenTelemetry exporters (in-memory exporters)
   scenarios/   fault-injection suite, parametrized over DAG roles and both runners
-  bench/       smoke test for the benchmark script
+  bench/       smoke test for the benchmark script (slow)
 ```

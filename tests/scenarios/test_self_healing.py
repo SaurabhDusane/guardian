@@ -20,11 +20,11 @@ from guardian.demo.faults import code_bug
 from ..agent.helpers import answer, revert_fix
 from ..helpers.profile import block_profiles
 from ..helpers.project_repo import SPEC_REL, repo_state
-from ..helpers.roles import descendants, representative
+from ..helpers.roles import descendants, representative, role_params
 from .runners import StandaloneRunner
 from .test_scenarios import ROLES, SPEC, assert_dependents_follow_rules, check_invariants
 
-by_role = pytest.mark.parametrize("role", ROLES)
+by_role = pytest.mark.parametrize("role", role_params(ROLES))
 PROFILES = block_profiles(SPEC)
 
 

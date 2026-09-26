@@ -14,10 +14,10 @@ from guardian.agent.diagnose import FakeClient, auto_diagnoser
 from guardian.core.events import EventKind
 from guardian.demo.faults import code_bug, crash
 
-from ..helpers.roles import representative
+from ..helpers.roles import representative, role_params
 from .test_scenarios import ROLES, SPEC, assert_dependents_follow_rules, check_invariants
 
-by_role = pytest.mark.parametrize("role", ROLES)
+by_role = pytest.mark.parametrize("role", role_params(ROLES))
 
 RECORDED = json.dumps(
     {

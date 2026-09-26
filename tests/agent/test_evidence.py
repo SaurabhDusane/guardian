@@ -27,10 +27,10 @@ from guardian.core.provenance import QUALITY_COL
 from guardian.demo.faults import CORRUPT_NUMBER, CORRUPT_TEXT, crash
 
 from ..helpers.roles import ROLES as TEST_ROLES
-from ..helpers.roles import ancestors, dependents, representative, roles_of
+from ..helpers.roles import ancestors, dependents, representative, role_params, roles_of
 from .helpers import FAULT_TYPES, ROLES, SPEC, clean_then_fault, run, with_block
 
-by_role = pytest.mark.parametrize("role", ROLES)
+by_role = pytest.mark.parametrize("role", role_params(ROLES))
 
 
 def bundle(root, block: str, run_id: str | None = "r2", spec=SPEC, **kw) -> EvidenceBundle:

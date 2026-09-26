@@ -15,7 +15,7 @@ from guardian.demo.faults import Fault, apply_faults
 from guardian.runner.executor import Executor
 
 from ..helpers.roles import present_roles
-from ..scenarios.runners import scenario_spec
+from ..scenarios.runners import dagster_instance, scenario_spec
 
 SPEC = scenario_spec(rows=120)
 ROLES = present_roles(SPEC)
@@ -26,6 +26,7 @@ RUNNERS = [
         "dagster",
         marks=[
             pytest.mark.dagster,
+            pytest.mark.slow,
             pytest.mark.skipif(not HAS_DAGSTER, reason="dagster extra not installed"),
         ],
     ),
@@ -58,6 +59,8 @@ def execute(
         result = (
             build_definitions(g)
             .resolve_job_def(PIPELINE_JOB)
-            .execute_in_process(raise_on_error=False, tags={RUN_ID_TAG: run_id})
+            .execute_in_process(
+                raise_on_error=False, tags={RUN_ID_TAG: run_id}, instance=dagster_instance()
+            )
         )
         assert result.success, [e.message for e in result.all_events if e.is_failure]

@@ -16,10 +16,10 @@ from guardian.core.guardian import Guardian
 from guardian.core.models import BlockStatus, DriftPolicy, DriftThresholds
 from guardian.demo.faults import drift
 
-from ..helpers.roles import representative
+from ..helpers.roles import representative, role_params
 from .test_scenarios import ROLES, SPEC, assert_dependents_follow_rules, check_invariants
 
-by_role = pytest.mark.parametrize("role", ROLES)
+by_role = pytest.mark.parametrize("role", role_params(ROLES))
 
 
 def with_drift(runner, block: str, policy: DriftPolicy | None) -> None:

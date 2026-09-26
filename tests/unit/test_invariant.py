@@ -7,6 +7,7 @@ that run, or quarantine for that run.
 import tempfile
 
 import pandas as pd
+import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
@@ -38,9 +39,31 @@ def frames(draw) -> pd.DataFrame:
     )
 
 
-@settings(max_examples=40, deadline=None, suppress_health_check=[HealthCheck.too_slow])
-@given(df=frames(), threshold=st.sampled_from([0.0, 0.1, 0.25, 0.5, 1.0]), drop=st.booleans())
+def _no_silent_loss_strategy(examples: int):
+    return lambda test: settings(
+        max_examples=examples, deadline=None, suppress_health_check=[HealthCheck.too_slow]
+    )(
+        given(
+            df=frames(),
+            threshold=st.sampled_from([0.0, 0.1, 0.25, 0.5, 1.0]),
+            drop=st.booleans(),
+        )(test)
+    )
+
+
+@pytest.mark.slow
+@_no_silent_loss_strategy(40)
 def test_no_silent_loss(df: pd.DataFrame, threshold: float, drop: bool) -> None:
+    check_no_silent_loss(df, threshold, drop)
+
+
+@_no_silent_loss_strategy(8)
+def test_no_silent_loss_quick(df: pd.DataFrame, threshold: float, drop: bool) -> None:
+    """The same property, fewer examples (the default run); the full run has 40."""
+    check_no_silent_loss(df, threshold, drop)
+
+
+def check_no_silent_loss(df: pd.DataFrame, threshold: float, drop: bool) -> None:
     if drop:  # occasionally a schema-level failure (missing column)
         df = df.drop(columns=["amount"])
     with (
@@ -79,14 +102,36 @@ def _held_ids(g: Guardian, run_id: str) -> list[int]:
     return ids
 
 
-@settings(max_examples=30, deadline=None, suppress_health_check=[HealthCheck.too_slow])
-@given(
-    df=frames(),
-    threshold=st.sampled_from([0.0, 0.25, 1.0]),
-    keyed=st.booleans(),
-    prior=st.booleans(),
-)
+def _replay_strategy(examples: int):
+    return lambda test: settings(
+        max_examples=examples, deadline=None, suppress_health_check=[HealthCheck.too_slow]
+    )(
+        given(
+            df=frames(),
+            threshold=st.sampled_from([0.0, 0.25, 1.0]),
+            keyed=st.booleans(),
+            prior=st.booleans(),
+        )(test)
+    )
+
+
+@pytest.mark.slow
+@_replay_strategy(30)
 def test_exactly_once_through_replay(
+    df: pd.DataFrame, threshold: float, keyed: bool, prior: bool
+) -> None:
+    check_exactly_once_through_replay(df, threshold, keyed, prior)
+
+
+@_replay_strategy(6)
+def test_exactly_once_through_replay_quick(
+    df: pd.DataFrame, threshold: float, keyed: bool, prior: bool
+) -> None:
+    """The same property, fewer examples (the default run); the full run has 30."""
+    check_exactly_once_through_replay(df, threshold, keyed, prior)
+
+
+def check_exactly_once_through_replay(
     df: pd.DataFrame, threshold: float, keyed: bool, prior: bool
 ) -> None:
     """After a run and two replays, every input row is held exactly once."""

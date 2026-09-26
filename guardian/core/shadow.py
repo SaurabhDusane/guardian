@@ -16,6 +16,7 @@ Absolute mode, or a shadow started with ``expect_diff``, needs an explicit appro
 from __future__ import annotations
 
 import json
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -25,6 +26,7 @@ from typing import Any
 import duckdb
 import pandas as pd
 
+from guardian.core.dbfile import DuckDBFile
 from guardian.core.models import GuardianError, ShadowPolicy, validate_name
 from guardian.core.provenance import QUALITY_COL
 
@@ -212,11 +214,16 @@ class ShadowStore:
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
         self.path = root / filename
+        self._db = DuckDBFile(self.path)
         with self._connect() as con:
             con.execute(_SCHEMA)
 
-    def _connect(self) -> duckdb.DuckDBPyConnection:
-        return duckdb.connect(str(self.path))
+    def _connect(self) -> AbstractContextManager[duckdb.DuckDBPyConnection]:
+        return self._db.connect()
+
+    def session(self) -> AbstractContextManager[None]:
+        """Share one connection for a unit of work (see core/dbfile.py)."""
+        return self._db.session()
 
     def start(self, block: str, version: str, *, expect_diff: bool) -> Shadow:
         validate_name(block, "block name")

@@ -8,7 +8,7 @@ at the very end, so an interrupted promotion is visible and can be resumed.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -16,6 +16,7 @@ from pathlib import Path
 
 import duckdb
 
+from guardian.core.dbfile import DuckDBFile
 from guardian.core.models import GuardianError, validate_name
 
 
@@ -112,11 +113,16 @@ class VersionRegistry:
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
         self.path = root / filename
+        self._db = DuckDBFile(self.path)
         with self._connect() as con:
             con.execute(_SCHEMA)
 
-    def _connect(self) -> duckdb.DuckDBPyConnection:
-        return duckdb.connect(str(self.path))
+    def _connect(self) -> AbstractContextManager[duckdb.DuckDBPyConnection]:
+        return self._db.connect()
+
+    def session(self) -> AbstractContextManager[None]:
+        """Share one connection for a unit of work (see core/dbfile.py)."""
+        return self._db.session()
 
     @contextmanager
     def _transaction(self) -> Iterator[duckdb.DuckDBPyConnection]:

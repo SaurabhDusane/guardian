@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
+import pytest
+
 from guardian.core.models import PipelineSpec
 from guardian.runner.spec_loader import topological_order
 
@@ -78,3 +82,30 @@ def representative(spec: PipelineSpec, role: str) -> str:
 def present_roles(spec: PipelineSpec) -> list[str]:
     roles = blocks_by_role(spec)
     return [role for role in ROLES if roles[role]]
+
+
+# ---------------------------------------------------------------- default vs full suite
+#
+# Role- and block-parametrized tests run for every role (block) in the full suite. The
+# default (fast) run keeps one of them per test, and tests/scenarios/test_smoke.py
+# covers every role in the default run, so each role is still exercised there.
+
+DEFAULT_ROLE = "fallback_protected"
+
+
+def role_params(roles: Sequence[str], default: str = DEFAULT_ROLE) -> list:
+    """``roles`` as pytest params; all but ``default`` are marked slow."""
+    keep = default if default in roles else roles[0]
+    return [
+        pytest.param(role, id=role, marks=() if role == keep else pytest.mark.slow)
+        for role in roles
+    ]
+
+
+def block_params(spec: PipelineSpec, role: str = DEFAULT_ROLE) -> list:
+    """Every block of ``spec`` as pytest params; all but the ``role`` representative slow."""
+    keep = representative(spec, role) if blocks_by_role(spec)[role] else spec.block_names[0]
+    return [
+        pytest.param(block, id=block, marks=() if block == keep else pytest.mark.slow)
+        for block in spec.block_names
+    ]

@@ -10,7 +10,7 @@ dg = pytest.importorskip("dagster")
 from guardian.adapters.dagster import PIPELINE_JOB, REPLAY_JOB  # noqa: E402
 from guardian.adapters.dagster.definitions import DEMO_SPEC, definitions_for  # noqa: E402
 
-pytestmark = pytest.mark.dagster
+pytestmark = [pytest.mark.dagster, pytest.mark.slow]
 
 
 def test_assets_mirror_the_yaml_spec(tmp_path) -> None:

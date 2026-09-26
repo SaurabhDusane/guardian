@@ -15,7 +15,7 @@ from guardian.core.models import BlockStatus, Quality, QuarantineStatus
 from guardian.core.shadow import ShadowMode
 from guardian.core.versions import PromotionKind, PromotionState
 
-from ..helpers.roles import ancestors, dependents, descendants, representative
+from ..helpers.roles import ancestors, dependents, descendants, representative, role_params
 from .test_scenarios import (
     PROFILES,
     ROLES,
@@ -25,7 +25,7 @@ from .test_scenarios import (
     corrupt,
 )
 
-by_role = pytest.mark.parametrize("role", ROLES)
+by_role = pytest.mark.parametrize("role", role_params(ROLES))
 
 
 def versioned(role: str) -> str:

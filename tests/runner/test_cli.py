@@ -7,7 +7,10 @@ from typer.testing import CliRunner
 from guardian.runner.cli import app, find_spec
 from guardian.runner.spec_loader import load_spec
 
+from ..helpers.roles import block_params
+
 runner = CliRunner()
+DEMO = load_spec(find_spec(Path("demo/pipeline.yaml")))
 
 
 def invoke(*args: str):
@@ -117,7 +120,7 @@ def test_block_commands_reject_unknown_block_clearly(tmp_path, args) -> None:
     assert "no_such_block" in result.output
 
 
-@pytest.mark.parametrize("block", load_spec(find_spec(Path("demo/pipeline.yaml"))).block_names)
+@pytest.mark.parametrize("block", block_params(DEMO))
 def test_block_commands_work_for_every_block(tmp_path, block) -> None:
     root = str(tmp_path)
     assert invoke("run", "demo/pipeline.yaml", "--root", root, "--run-id", "r1").exit_code == 0
@@ -193,7 +196,7 @@ def test_shadow_start_works_for_every_versioned_block(tmp_path, block) -> None:
     assert invoke("shadow", "stop", block, "--root", root).exit_code == 0
 
 
-@pytest.mark.parametrize("block", load_spec(find_spec(Path("demo/pipeline.yaml"))).block_names)
+@pytest.mark.parametrize("block", block_params(DEMO))
 def test_impact_and_lineage_work_for_every_block(tmp_path, block) -> None:
     root = str(tmp_path)
     invoke("run", "demo/pipeline.yaml", "--root", root, "--run-id", "r1")
@@ -293,7 +296,7 @@ def test_diagnose_command(tmp_path) -> None:
         assert result.exit_code == code and text in result.output, result.output
 
 
-@pytest.mark.parametrize("block", load_spec(find_spec(Path("demo/pipeline.yaml"))).block_names)
+@pytest.mark.parametrize("block", block_params(DEMO))
 def test_diagnose_evidence_works_for_every_block(tmp_path, block) -> None:
     root = str(tmp_path)
     invoke("run", "demo/pipeline.yaml", "--root", root, "--run-id", "r1")

@@ -23,6 +23,7 @@ def cases(tmp_path_factory):
     return generate_cases(SPEC, tmp_path_factory.mktemp("eval"))
 
 
+@pytest.mark.slow  # every block x fault type
 def test_a_case_for_every_block_and_fault_type(cases) -> None:
     assert [(c.block, c.fault) for c in cases] == [
         (b, f) for b in SPEC.block_names for f in FAULT_TYPES
@@ -42,6 +43,7 @@ def test_a_case_for_every_block_and_fault_type(cases) -> None:
     }
 
 
+@pytest.mark.slow  # every block x fault type
 def test_every_case_carries_the_evidence_that_separates_its_label(cases) -> None:
     """A correct diagnosis is possible from the bundle alone: schema changes show in the
     schema diff, code bugs in the code fingerprint, data drift in neither."""
@@ -70,6 +72,7 @@ def _script(cases) -> dict[str, list[str]]:
     return responses
 
 
+@pytest.mark.slow  # every block x fault type
 def test_report_metrics_match_the_scripted_answers(cases) -> None:
     client = FakeClient(_script(cases), model="scripted")
     report = run_eval(cases, client)
@@ -121,6 +124,7 @@ def test_report_metrics_match_the_scripted_answers(cases) -> None:
     json.dumps(data)
 
 
+@pytest.mark.slow  # every block x fault type
 def test_a_perfect_client_scores_one(cases) -> None:
     client = FakeClient({c.case_id: answer(c.label, ("E1",)) for c in cases})
     report = run_eval(cases, client)
@@ -193,6 +197,7 @@ def test_eval_cli_with_recorded_answers(tmp_path) -> None:
     assert unconfigured.exit_code == 1 and "GUARDIAN_LLM_PROVIDER" in unconfigured.output
 
 
+@pytest.mark.slow  # every block x fault type
 def test_fix_success_rate_by_role(cases, project_repo) -> None:
     """Every block's code_bug case: diagnose -> propose (dry run) -> shadow -> promote.
     One block gets a fix that breaks it, one is misdiagnosed; the rest must succeed."""

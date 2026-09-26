@@ -16,6 +16,7 @@ RUNNERS = [
         id="dagster",
         marks=[
             pytest.mark.dagster,
+            pytest.mark.slow,
             pytest.mark.skipif(not HAS_DAGSTER, reason="dagster extra not installed"),
         ],
     ),

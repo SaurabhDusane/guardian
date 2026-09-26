@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import abc
 import dataclasses
+import functools
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -46,6 +47,7 @@ from guardian.runner.spec_loader import load_spec
 DEMO_SPEC_PATH = Path(load_ref("guardian.demo:__file__")).parent / "pipeline.yaml"
 
 
+@functools.cache
 def scenario_spec(rows: int = 200, required_runs: int = 2) -> PipelineSpec:
     """The demo spec with clean (error-free) input, so every quarantine is a fault.
 
@@ -128,7 +130,8 @@ class ScenarioRunner(abc.ABC):
     def _read(self, fn: Callable[[Guardian], Any]) -> Any:
         if self._reader is None:
             self._reader = Guardian(self.spec, self.root, registry=self.registry)
-        return fn(self._reader)
+        with self._reader.session():  # one connection per store for this read
+            return fn(self._reader)
 
     def status(self, block: str) -> BlockStatus:
         return self._read(lambda g: g.status(block))
@@ -267,6 +270,19 @@ class StandaloneRunner(ScenarioRunner):
             return g.replay(block)
 
 
+@functools.cache
+def dagster_instance() -> Any:
+    """One ephemeral Dagster instance per test session (per xdist worker).
+
+    Safe to share: Guardian's Dagster adapter keeps all state in Guardian's own stores
+    (each test has its own storage root) and never reads the instance's run or asset
+    records; the instance only accumulates run history, and run ids are unique.
+    """
+    import dagster as dg
+
+    return dg.DagsterInstance.ephemeral()
+
+
 class DagsterRunner(ScenarioRunner):
     """Runs the same spec through the Dagster adapter with in-process execution."""
 
@@ -280,7 +296,7 @@ class DagsterRunner(ScenarioRunner):
         with Guardian(spec, self.root, registry=registry, diagnoser=self.diagnoser) as g:
             defs = build_definitions(g)
             result = defs.resolve_job_def(job_name).execute_in_process(
-                raise_on_error=False, **kwargs
+                raise_on_error=False, instance=dagster_instance(), **kwargs
             )
             if not result.success:
                 failures = [e.message for e in result.all_events if e.is_failure]

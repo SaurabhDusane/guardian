@@ -93,8 +93,9 @@ class Executor:
             selected = [b for b in self.order if b in set(only)]
         report = RunReport(run_id=run_id, pipeline=g.spec.name)
         g.events.emit(EventKind.RUN_STARTED, run_id=run_id, pipeline=g.spec.name)
-        for block in selected:
-            report.blocks.append(self._run_one(block, run_id))
+        with g.session():  # one connection per store for the whole run
+            for block in selected:
+                report.blocks.append(self._run_one(block, run_id))
         g.events.emit(
             EventKind.RUN_FINISHED,
             run_id=run_id,

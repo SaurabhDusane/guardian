@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import functools
 import json
 import os
 import traceback
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -135,6 +136,17 @@ def new_run_id(prefix: str = "run") -> str:
     return f"{prefix}-{datetime.now(UTC):%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:6]}"
 
 
+def _in_session(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Run a Guardian method as one unit of work (see Guardian.session)."""
+
+    @functools.wraps(method)
+    def wrapper(self: Guardian, *args: Any, **kwargs: Any) -> Any:
+        with self.session():
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class Guardian:
     def __init__(
         self,
@@ -186,6 +198,18 @@ class Guardian:
 
     def close(self) -> None:
         self.events.close()
+
+    @contextlib.contextmanager
+    def session(self) -> Iterator[None]:
+        """One unit of work (a pipeline run, a block, a promotion): each store keeps a
+        single connection open until it ends, instead of one per operation. Outside a
+        session no store holds its file, so other processes can always open it."""
+        with contextlib.ExitStack() as stack:
+            for store in (self.provenance, self.quarantine, self.versions, self.shadows):
+                session = getattr(store, "session", None)
+                if session is not None:
+                    stack.enter_context(session())
+            yield
 
     def __enter__(self) -> Guardian:
         return self
@@ -371,6 +395,7 @@ class Guardian:
         self._staged[(block, run_id)] = inputs
         return self.compute(block, inputs)
 
+    @_in_session
     def complete_block(
         self, block: str, run_id: str, result: Any, inputs: Any = None
     ) -> tuple[Decision | None, ShadowRun | None]:
@@ -428,6 +453,7 @@ class Guardian:
         assert decision is not None
         return decision
 
+    @_in_session
     def on_crash(self, block: str, run_id: str, error: BaseException) -> Decision:
         self.spec.block(block)
         self.events.emit(
@@ -441,6 +467,7 @@ class Guardian:
         self._record_run(block, run_id, "ROLLBACK", CRASH_REASON)
         return decision
 
+    @_in_session
     def on_output(self, block: str, run_id: str, df: pd.DataFrame) -> Decision:
         spec = self.spec.block(block)
         validate_name(run_id, "run_id")
@@ -733,6 +760,7 @@ class Guardian:
 
     # ------------------------------------------------------------------ replay
 
+    @_in_session
     def replay(
         self,
         block: str,
@@ -1068,6 +1096,7 @@ class Guardian:
             self.promote(block, reason="auto")
         return run
 
+    @_in_session
     def promote(
         self,
         block: str,
@@ -1199,6 +1228,7 @@ class Guardian:
             resumed,
         )
 
+    @_in_session
     def rollback_version(self, block: str) -> Promotion:
         """Make the previous version active again. No snapshot is rewritten.
 

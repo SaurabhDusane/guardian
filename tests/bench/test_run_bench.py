@@ -4,9 +4,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).parents[2]
 
 
+@pytest.mark.slow
 def test_run_bench_smoke(tmp_path) -> None:
     out = tmp_path / "results.md"
     proc = subprocess.run(

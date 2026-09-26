@@ -25,6 +25,7 @@ guardian = "guardian.runner.cli:main"
 dev = [
     "hypothesis>=6.100",
     "pytest>=8.0",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.6",
 ]
 
@@ -49,7 +50,11 @@ quote-style = "double"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers"
+# The default run is the fast suite. Full suite: -m "not llm and not docker".
+addopts = "-ra --strict-markers -m 'not slow and not llm and not docker'"
 markers = [
-    "dagster: tests that require the optional dagster extra",
+    "slow: long-running tests (the Dagster runner, exhaustive per-role scenarios, property tests); in the full suite",
+    "dagster: needs the dagster extra (every Dagster runner scenario is also slow)",
+    "llm: calls a real LLM API (network and an API key); also needs GUARDIAN_LLM_LIVE=1",
+    "docker: needs Docker (the local observability stack)",
 ]

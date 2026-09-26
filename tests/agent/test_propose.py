@@ -32,7 +32,7 @@ from guardian.demo.faults import apply_faults, code_bug, schema_drift
 from guardian.runner.spec_loader import parse_spec
 
 from ..helpers.project_repo import SPEC_REL, git, make_project_repo, repo_state
-from ..helpers.roles import dependents, representative
+from ..helpers.roles import block_params, dependents, representative, role_params
 from .helpers import (
     ROLES,
     SPEC,
@@ -46,7 +46,7 @@ from .helpers import (
     with_block,
 )
 
-by_role = pytest.mark.parametrize("role", ROLES)
+by_role = pytest.mark.parametrize("role", role_params(ROLES))
 UNKNOWN_ANSWER = json.dumps(
     {"root_cause": "unknown", "confidence": 0.3, "summary": "unclear", "claims": []}
 )
@@ -89,7 +89,7 @@ def test_append_definition_only_adds_new_names() -> None:
     assert schema.endswith("S2 = dict()\n")
 
 
-@pytest.mark.parametrize("block", SPEC.block_names)
+@pytest.mark.parametrize("block", block_params(SPEC))
 def test_add_version_to_any_block_keeps_everything_else(project_repo, block: str) -> None:
     text = (project_repo / SPEC_REL).read_text(encoding="utf-8")
     before = parse_spec(yaml.safe_load(text))
