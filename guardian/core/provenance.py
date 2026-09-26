@@ -116,6 +116,7 @@ class BlockRun:
     version: str | None
     reason: str | None = None
     ts: datetime | None = None
+    code: str | None = None  # fingerprint of the code that ran (see core/code.py)
 
 
 @runtime_checkable
@@ -171,6 +172,7 @@ CREATE TABLE IF NOT EXISTS block_runs (
     ts       TIMESTAMP NOT NULL,       -- UTC
     PRIMARY KEY (block, run_id)
 );
+ALTER TABLE block_runs ADD COLUMN IF NOT EXISTS code VARCHAR;
 """
 
 _PROV_COLS = (
@@ -180,7 +182,7 @@ _INPUT_COLS = (
     "block, run_id, store, position, upstream, source_block, source_run_id, adapter, read, "
     "quality, upstream_status"
 )
-_RUN_COLS = "block, run_id, outcome, status, version, reason, ts"
+_RUN_COLS = "block, run_id, outcome, status, version, reason, ts, code"
 
 
 def _now() -> datetime:
@@ -298,8 +300,17 @@ class DuckDBProvenanceStore:
                 "DELETE FROM block_runs WHERE block = ? AND run_id = ?", [run.block, run.run_id]
             )
             con.execute(
-                f"INSERT INTO block_runs ({_RUN_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                [run.block, run.run_id, run.outcome, run.status, run.version, run.reason, _now()],
+                f"INSERT INTO block_runs ({_RUN_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    run.block,
+                    run.run_id,
+                    run.outcome,
+                    run.status,
+                    run.version,
+                    run.reason,
+                    _now(),
+                    run.code,
+                ],
             )
 
     def runs(self, block: str | None = None) -> list[BlockRun]:
@@ -309,7 +320,8 @@ class DuckDBProvenanceStore:
                 f"SELECT {_RUN_COLS} FROM block_runs {where} ORDER BY ts, block", params
             ).fetchall()
         return [
-            BlockRun(r[0], r[1], r[2], r[3], r[4], r[5], r[6].replace(tzinfo=UTC)) for r in rows
+            BlockRun(r[0], r[1], r[2], r[3], r[4], r[5], r[6].replace(tzinfo=UTC), r[7])
+            for r in rows
         ]
 
 

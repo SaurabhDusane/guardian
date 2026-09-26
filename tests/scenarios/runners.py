@@ -89,6 +89,9 @@ class ScenarioRunner(abc.ABC):
         self.root = root
         self.faults: dict[str, tuple[Fault, ...]] = {}
         self._reader: Guardian | None = None
+        # The auto-diagnosis hook the acting Guardian gets (as the CLI and the Dagster
+        # definitions pass one); None, like a Guardian built without one.
+        self.diagnoser: Callable[[Guardian, str, str], Any] | None = None
 
     # -------------------------------------------------------------- actions
 
@@ -163,7 +166,7 @@ class ScenarioRunner(abc.ABC):
     def _acting_guardian(self) -> Iterator[Guardian]:
         spec, registry = self._faulted()
         self.close()
-        with Guardian(spec, self.root, registry=registry) as g:
+        with Guardian(spec, self.root, registry=registry, diagnoser=self.diagnoser) as g:
             yield g
 
     # -------------------------------------------------------------- shadow versions
@@ -271,7 +274,7 @@ class DagsterRunner(ScenarioRunner):
 
         spec, registry = self._faulted()  # same fault wiring
         self.close()
-        with Guardian(spec, self.root, registry=registry) as g:
+        with Guardian(spec, self.root, registry=registry, diagnoser=self.diagnoser) as g:
             defs = build_definitions(g)
             result = defs.resolve_job_def(job_name).execute_in_process(
                 raise_on_error=False, **kwargs

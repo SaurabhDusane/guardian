@@ -144,9 +144,17 @@ class BlockSpec:
     # Opt-in: append a ``_guardian_quality`` column (FRESH/STALE/FALLBACK) to this
     # block's promoted output. Off by default: user frames are never changed silently.
     annotate_quality: bool = False
+    # Opt-in: run the diagnosis agent after a ROLLBACK (advisory; never fails a run).
+    auto_diagnose: bool = False
+    # Columns whose values are masked in anything sent to an LLM.
+    redact_columns: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         validate_name(self.name, "block name")
+        redact = tuple(self.redact_columns)
+        if not all(isinstance(c, str) and c for c in redact):
+            raise ValueError(f"block {self.name!r}: redact_columns must be column names")
+        object.__setattr__(self, "redact_columns", redact)
         object.__setattr__(self, "versions", MappingProxyType(dict(self.versions)))
         if self.versions:
             for version in self.versions:

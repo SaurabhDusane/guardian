@@ -5,6 +5,7 @@ from guardian.demo.faults import (
     CORRUPT_NUMBER,
     CORRUPT_TEXT,
     FaultInjected,
+    code_bug,
     corrupt_rows,
     crash,
     inject,
@@ -85,6 +86,8 @@ def test_crash_and_inject(df) -> None:
         ("b4_clean:corrupt:0.1", "b4_clean", "corrupt_rows(0.1)"),
         ("b6_enrich:null:segment:0.3", "b6_enrich", "null_burst(segment, 0.3)"),
         ("b6_enrich:crash", "b6_enrich", "crash"),
+        ("b2_parse:code_bug", "b2_parse", "code_bug(0.5)"),
+        ("b2_parse:code_bug:0.25", "b2_parse", "code_bug(0.25)"),
     ],
 )
 def test_parse_fault(text, block, name) -> None:
@@ -100,7 +103,8 @@ def test_parse_fault_drift(df) -> None:
 
 
 @pytest.mark.parametrize(
-    "text", ["b6", "b6:explode", "b6:corrupt:lots", "b6:crash:now", "b:rename:x"]
+    "text",
+    ["b6", "b6:explode", "b6:corrupt:lots", "b6:crash:now", "b:rename:x", "b:code_bug:1:2"],
 )
 def test_parse_fault_rejects(text) -> None:
     with pytest.raises(ValueError):
@@ -114,3 +118,23 @@ def test_corrupt_rows_unique_values(df) -> None:
     assert out.loc[hit, "s"].is_unique and out.loc[hit, "n"].is_unique
     assert (out.loc[hit, "n"] <= CORRUPT_NUMBER).all()
     assert out.dtypes.equals(df.dtypes)
+
+
+def test_code_bug_swaps_the_implementation(df) -> None:
+    """A new implementation (its code fingerprint differs), wrong in exactly
+    round(fraction * n) rows: numbers negated, text padded, timestamps lost."""
+    from guardian.core.code import fingerprint
+
+    def block(frame: pd.DataFrame) -> pd.DataFrame:
+        return frame.assign(x=frame["x"] * 2)
+
+    buggy = inject(block, code_bug(0.25, seed=3))
+    out, good = buggy(df), block(df)
+    rows = pick_positions(len(df), 0.25, 3)
+    assert (out["x"].iloc[rows] == -good["x"].iloc[rows]).all()
+    assert (out["s"].iloc[rows] == "a ").all() and out["t"].iloc[rows].isna().all()
+    untouched = [i for i in range(len(df)) if i not in set(rows)]
+    pd.testing.assert_frame_equal(out.iloc[untouched], good.iloc[untouched])
+    assert fingerprint(buggy, "r").sha != fingerprint(block, "r").sha
+    # Data faults wrap the implementation: the fingerprint is unchanged.
+    assert fingerprint(inject(block, corrupt_rows(0.5)), "r").sha == fingerprint(block, "r").sha

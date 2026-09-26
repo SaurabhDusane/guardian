@@ -17,6 +17,7 @@ from typing import Any, Protocol, runtime_checkable
 import numpy as np
 import pandas as pd
 
+from guardian.core.code import CodeFingerprint, CodeStore, fingerprint
 from guardian.core.events import EventKind, EventLogger
 from guardian.core.models import (
     DEFAULT_STORAGE_ROOT,
@@ -145,6 +146,7 @@ class Guardian:
         registry: Mapping[str, Any] | None = None,
         sample_rate: float = 1.0,
         provenance: ProvenanceStore | None = None,
+        diagnoser: Callable[[Guardian, str, str], Any] | None = None,
     ) -> None:
         self.spec = spec
         self.root = Path(root)
@@ -155,6 +157,11 @@ class Guardian:
         self.registry = dict(registry or {})
         self.versions = VersionRegistry(self.root)
         self.provenance = provenance or DuckDBProvenanceStore(self.root)
+        self.code = CodeStore(self.root)
+        self._code_cache: dict[str, tuple[Any, CodeFingerprint]] = {}
+        # Called as diagnoser(guardian, block, run_id) after a ROLLBACK of a block with
+        # ``auto_diagnose``. Advisory only: whatever it does or raises, the run goes on.
+        self.diagnoser = diagnoser
         self._quality_cache: dict[tuple[str, str], Quality] = {}
         self.shadows = ShadowStore(self.root)
         self._validators: dict[str, Validator] = {}
@@ -377,7 +384,34 @@ class Guardian:
             self._record_run(block, run_id, outcome, result.reason)
         shadow = None if inputs is None else self.run_shadow(block, run_id, inputs, decision)
         self.shadow_results[(block, run_id)] = shadow
+        if decision is not None and decision.action is Action.ROLLBACK:
+            self._auto_diagnose(block, run_id)
         return decision, shadow
+
+    def _auto_diagnose(self, block: str, run_id: str) -> None:
+        """Run the diagnoser for an ``auto_diagnose`` block; never fails the pipeline."""
+        if not self.spec.block(block).auto_diagnose:
+            return
+        if self.diagnoser is None:
+            self.events.emit(
+                EventKind.WARN,
+                block=block,
+                run_id=run_id,
+                warning="auto_diagnose is set but no diagnoser is configured",
+                agent=True,
+            )
+            return
+        try:
+            self.diagnoser(self, block, run_id)
+        except Exception as exc:  # advisory: a diagnosis failure is logged, never raised
+            self.events.emit(
+                EventKind.WARN,
+                block=block,
+                run_id=run_id,
+                warning="auto-diagnosis failed",
+                error=f"{type(exc).__name__}: {exc}",
+                agent=True,
+            )
 
     def run_block(self, block: str, run_id: str, inputs: Sequence[pd.DataFrame] = ()) -> Decision:
         """Call the block's function on ``inputs`` and hand the result to on_output.
@@ -582,6 +616,7 @@ class Guardian:
             self._quality_cache[(provenance.block, provenance.run_id)] = provenance.quality
 
     def _record_run(self, block: str, run_id: str, outcome: str, reason: str | None = None):
+        code = self.code_fingerprint(block)
         self.provenance.record_run(
             BlockRun(
                 block,
@@ -590,8 +625,25 @@ class Guardian:
                 self.status(block).value,
                 self.active_version(block),
                 reason,
+                code=code.sha if code else None,
             )
         )
+
+    def code_fingerprint(self, block: str, version: str | None = None) -> CodeFingerprint | None:
+        """Fingerprint of a version's code (default: the live one); its source is stored."""
+        spec = self.spec.block(block)
+        try:
+            ref = spec.version_ref(version if version is not None else self.active_version(block))
+            fn = self.resolve(ref)
+        except Exception:
+            return None
+        cached = self._code_cache.get(ref)
+        if cached is not None and cached[0] is fn:
+            return cached[1]
+        fp = fingerprint(fn, ref)
+        self.code.put(fp)
+        self._code_cache[ref] = (fn, fp)
+        return fp
 
     def read(self, ref: DataRef) -> pd.DataFrame:
         """Load the snapshot behind ``ref`` and apply its adapter transform, if any."""

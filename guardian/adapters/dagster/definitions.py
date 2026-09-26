@@ -25,6 +25,7 @@ from guardian.adapters.dagster.io_manager import (
     guardian_run_id,
 )
 from guardian.adapters.dagster.replay import REPLAY_IO_MANAGER_KEY, build_replay_job
+from guardian.agent.diagnose import auto_diagnoser
 from guardian.core.guardian import Guardian
 from guardian.core.models import DEFAULT_STORAGE_ROOT, BlockSpec, PipelineSpec
 from guardian.runner.spec_loader import load_spec
@@ -91,7 +92,9 @@ def definitions_for(
 ) -> dg.Definitions:
     if not isinstance(spec, PipelineSpec):
         spec = load_spec(spec)
-    guardian = Guardian(spec, root, registry=registry)
+    # Blocks with auto_diagnose get an advisory diagnosis after a ROLLBACK (core calls
+    # the hook; LLM settings come from the environment).
+    guardian = Guardian(spec, root, registry=registry, diagnoser=auto_diagnoser())
     guardian.close()  # release the event DB until first use; it reopens lazily
     return build_definitions(guardian)
 

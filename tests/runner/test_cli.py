@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -231,3 +232,78 @@ def test_impact_and_lineage_reject_unknown_names(tmp_path) -> None:
     assert result.exit_code == 2 and "no run 'zz'" in result.output
     result = invoke("lineage", "b1_ingest", "zz", "--root", root)
     assert result.exit_code == 2 and "no provenance" in result.output
+
+
+def test_diagnose_command(tmp_path) -> None:
+    root = str(tmp_path)
+    invoke("run", "demo/pipeline.yaml", "--root", root, "--run-id", "r1")
+    invoke(
+        "run",
+        "demo/pipeline.yaml",
+        "--root",
+        root,
+        "--run-id",
+        "r2",
+        "--fault",
+        "b4_clean:code_bug",
+    )
+    result = invoke("diagnose", "b4_clean", "--root", root, "--evidence-only")
+    assert result.exit_code == 0, result.output
+    assert "E1" in result.output and "code_change" in result.output
+    assert (tmp_path / "diagnoses" / "b4_clean" / "r2" / "evidence.json").exists()
+
+    result = runner.invoke(
+        app, ["diagnose", "b4_clean", "--root", root], env={"GUARDIAN_LLM_PROVIDER": ""}
+    )
+    assert result.exit_code == 1 and "GUARDIAN_LLM_PROVIDER" in result.output
+
+    recorded = tmp_path / "recorded.json"
+    answer = {
+        "root_cause": "code_bug",
+        "confidence": 0.9,
+        "summary": "Code changed since r1.",
+        "claims": [{"statement": "fingerprint changed", "evidence": ["E1"]}],
+    }
+    recorded.write_text(
+        json.dumps({"model": "rec", "responses": {"b4_clean/r2": json.dumps(answer)}}),
+        encoding="utf-8",
+    )
+    result = invoke(
+        "diagnose",
+        "b4_clean",
+        "--run",
+        "r2",
+        "--root",
+        root,
+        "--provider",
+        "fake",
+        "--fake-responses",
+        str(recorded),
+    )
+    assert result.exit_code == 0, result.output
+    assert "root cause: code_bug" in result.output and "accepted" in result.output
+    saved = json.loads((tmp_path / "diagnoses" / "b4_clean" / "r2" / "diagnosis.json").read_text())
+    assert saved["root_cause"] == "code_bug"
+
+    for args, code, text in (
+        (["diagnose", "no_such_block"], 2, "no_such_block"),
+        (["diagnose", "b4_clean", "--run", "zz", "--evidence-only"], 1, "no recorded run 'zz'"),
+    ):
+        result = invoke(*args, "--root", root)
+        assert result.exit_code == code and text in result.output, result.output
+
+
+@pytest.mark.parametrize("block", load_spec(find_spec(Path("demo/pipeline.yaml"))).block_names)
+def test_diagnose_evidence_works_for_every_block(tmp_path, block) -> None:
+    root = str(tmp_path)
+    invoke("run", "demo/pipeline.yaml", "--root", root, "--run-id", "r1")
+    invoke(
+        "run", "demo/pipeline.yaml", "--root", root, "--run-id", "r2", "--fault", f"{block}:crash"
+    )
+    result = invoke("diagnose", block, "--root", root, "--evidence-only")
+    assert result.exit_code == 0, result.output
+    assert f"{block} on run r2: ROLLBACK" in result.output
+    evidence = json.loads(
+        (tmp_path / "diagnoses" / block / "r2" / "evidence.json").read_text(encoding="utf-8")
+    )
+    assert evidence["block"] == block and evidence["items"][0]["id"] == "E1"

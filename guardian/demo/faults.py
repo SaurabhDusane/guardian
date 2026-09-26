@@ -1,8 +1,12 @@
 """Fault injection for demos and the scenario suite.
 
-A fault transforms a block's output (or raises). ``inject(fn, *faults)`` wraps a
+A data fault transforms a block's output (or raises). ``inject(fn, *faults)`` wraps a
 block function so its output passes through the faults in order. Row selection is
 seeded and takes exactly ``round(fraction * n)`` rows, so tests can assert counts.
+
+``code_bug`` is different: it replaces the block's implementation with a buggy one
+(a new function, not a wrapper of the old one), so the change shows up in the block's
+code fingerprint just as a bad deploy would.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ import pandas as pd
 
 from guardian.core.models import PipelineSpec
 from guardian.core.refs import load_ref
+from guardian.demo.refactor import rewrite
 
 CORRUPT_TEXT = "__corrupt__"
 CORRUPT_NUMBER = -999_999
@@ -31,6 +36,10 @@ class FaultInjected(RuntimeError):
 class Fault:
     name: str
     apply: Callable[[pd.DataFrame], pd.DataFrame] = field(repr=False)
+    # Set for code faults: builds a replacement implementation from the real one.
+    replace: Callable[[Callable[..., pd.DataFrame]], Callable[..., pd.DataFrame]] | None = field(
+        default=None, repr=False
+    )
 
     def __call__(self, df: pd.DataFrame) -> pd.DataFrame:
         return self.apply(df)
@@ -126,8 +135,28 @@ def null_burst(column: str, fraction: float, seed: int = 0) -> Fault:
     return Fault(f"null_burst({column}, {fraction})", apply)
 
 
+def code_bug(fraction: float = 0.5, seed: int = 0) -> Fault:
+    """Replace the block's implementation with a buggy rewrite of it.
+
+    The rewrite still calls the original logic, then mishandles a fraction of rows:
+    numbers get the wrong sign, text gets a trailing space, timestamps are lost. It is
+    a new function (no ``functools.wraps``), so the block's code fingerprint changes.
+    """
+
+    def replace(fn: Callable[..., pd.DataFrame]) -> Callable[..., pd.DataFrame]:
+        return rewrite(fn, lambda n: pick_positions(n, fraction, seed))
+
+    return Fault(f"code_bug({fraction})", lambda df: df, replace)
+
+
 def inject(fn: Callable[..., pd.DataFrame], *faults: Fault) -> Callable[..., pd.DataFrame]:
-    """Wrap ``fn`` so its output goes through ``faults`` in order."""
+    """Wrap ``fn`` so its output goes through ``faults`` in order.
+
+    Code faults (``code_bug``) first replace ``fn`` itself with their implementation.
+    """
+    for fault in faults:
+        if fault.replace is not None:
+            fn = fault.replace(fn)
 
     @functools.wraps(fn)
     def faulty(*args: object, **kwargs: object) -> pd.DataFrame:
@@ -175,7 +204,8 @@ def apply_faults(
 
 FAULT_SYNTAX = (
     "BLOCK:corrupt:FRACTION[:COL,COL]  |  BLOCK:null:COLUMN:FRACTION  |  "
-    "BLOCK:drop:COL[,COL]  |  BLOCK:rename:OLD=NEW  |  BLOCK:crash"
+    "BLOCK:drop:COL[,COL]  |  BLOCK:rename:OLD=NEW  |  BLOCK:crash  |  "
+    "BLOCK:code_bug[:FRACTION]"
 )
 
 
@@ -198,6 +228,8 @@ def parse_fault(text: str, seed: int = 0) -> tuple[str, Fault]:
             return block, schema_drift(rename={old: new})
         if kind == "crash" and not args:
             return block, crash(f"injected crash in {block}")
+        if kind == "code_bug" and len(args) <= 1:
+            return block, code_bug(float(args[0]) if args else 0.5, seed=seed)
     except ValueError as exc:
         raise ValueError(f"bad fault {text!r}: {exc}") from exc
     raise ValueError(f"bad fault {text!r}; expected {FAULT_SYNTAX}")

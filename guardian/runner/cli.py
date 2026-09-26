@@ -1,4 +1,5 @@
-"""Command-line entry point: `guardian run|replay|status|set-status`."""
+"""Command-line entry point: `guardian run|replay|status|set-status|shadow|impact|lineage|
+diagnose|eval`."""
 
 from __future__ import annotations
 
@@ -13,6 +14,16 @@ from rich.table import Table
 from rich.tree import Tree
 
 import guardian as guardian_pkg
+from guardian.agent.diagnose import (
+    ACCEPTED,
+    FAILED,
+    DiagnosisResult,
+    LLMConfig,
+    auto_diagnoser,
+    diagnose,
+    make_client,
+)
+from guardian.agent.evidence import DEFAULT_SAMPLE_SIZE, EvidenceBundle, build_evidence, default_run
 from guardian.core.guardian import Guardian
 from guardian.core.models import (
     DEFAULT_STORAGE_ROOT,
@@ -102,7 +113,9 @@ def _open(
             spec, registry = apply_faults(spec, by_block)
         except (KeyError, ValueError) as exc:
             raise typer.BadParameter(str(exc), param_hint="--fault") from exc
-    return Guardian(spec, root, sample_rate=sample_rate, registry=registry)
+    return Guardian(
+        spec, root, sample_rate=sample_rate, registry=registry, diagnoser=auto_diagnoser()
+    )
 
 
 @app.command()
@@ -524,6 +537,174 @@ def render_lineage(root: LineageNode) -> Tree:
 
     add(tree, root)
     return tree
+
+
+ProviderOption = typer.Option(
+    None, "--provider", help="LLM provider: anthropic or fake (default: $GUARDIAN_LLM_PROVIDER)."
+)
+ModelOption = typer.Option(None, "--model", help="Model name (default: $GUARDIAN_LLM_MODEL).")
+FakeResponsesOption = typer.Option(
+    None,
+    "--fake-responses",
+    help="Recorded responses for the fake provider (default: $GUARDIAN_LLM_FAKE_RESPONSES).",
+)
+
+
+def _llm_config(provider: str | None, model: str | None, fake: Path | None) -> LLMConfig:
+    return LLMConfig.from_env(
+        provider=provider, model=model, fake_responses=str(fake) if fake else None
+    )
+
+
+@app.command("diagnose")
+def diagnose_cmd(
+    block: str = typer.Argument(..., help="Any block in the spec."),
+    run: str | None = typer.Option(
+        None, "--run", help="Run to diagnose (default: the block's latest ROLLBACK)."
+    ),
+    sample_size: int = typer.Option(
+        DEFAULT_SAMPLE_SIZE, "--sample-size", min=0, help="Quarantined rows to include."
+    ),
+    evidence_only: bool = typer.Option(
+        False, "--evidence-only", help="Only build and write the evidence bundle (no LLM call)."
+    ),
+    provider: str | None = ProviderOption,
+    model: str | None = ModelOption,
+    fake_responses: Path | None = FakeResponsesOption,
+    spec: Path | None = SpecOption,
+    root: Path = RootOption,
+) -> None:
+    """Diagnose why BLOCK failed on a run (advisory: nothing is changed).
+
+    Writes the evidence bundle and the diagnosis to <root>/diagnoses/<block>/<run>/.
+    """
+    with _guarded(root, spec) as g:
+        g.spec.block(block)
+        run_id = run or default_run(g, block)
+        if evidence_only:
+            bundle = build_evidence(g, block, run_id, sample_size=sample_size)
+            path = bundle.write(g.root)
+            console.print(render_evidence(bundle))
+            console.print(f"Evidence written to {path}")
+            return
+        client = make_client(_llm_config(provider, model, fake_responses))
+        result = diagnose(g, block, run_id, client=client, sample_size=sample_size)
+        render_diagnosis(result)
+        if result.diagnosis.status == FAILED:
+            raise typer.Exit(code=1)
+
+
+def render_evidence(bundle: EvidenceBundle) -> Table:
+    table = Table(title=f"Evidence for {bundle.block} on {bundle.run_id}")
+    table.add_column("id")
+    table.add_column("kind")
+    table.add_column("item")
+    for item in bundle.items:
+        table.add_row(item.id, item.kind, escape(item.title))
+    return table
+
+
+def render_diagnosis(result: DiagnosisResult) -> None:
+    d = result.diagnosis
+    style = "green" if d.status == ACCEPTED else "yellow" if d.status != FAILED else "red"
+    console.print(
+        f"[bold]Diagnosis of {d.block} on {d.run_id}[/bold] (advisory, model {escape(d.model)})"
+    )
+    console.print(
+        f"root cause: [bold]{d.root_cause}[/bold]   confidence: {d.confidence:.2f}   "
+        f"status: [{style}]{d.status}[/]"
+    )
+    if d.status != ACCEPTED:
+        console.print(f"[{style}]{escape(d.reason or '')}[/]")
+        if d.proposed:
+            console.print(
+                f"model proposed: {escape(str(d.proposed.get('root_cause')))} "
+                f"(confidence {d.proposed.get('confidence')}), not trusted"
+            )
+    else:
+        console.print(escape(d.summary))
+        table = Table(show_header=True)
+        table.add_column("#")
+        table.add_column("claim")
+        table.add_column("evidence")
+        for i, claim in enumerate(d.claims, 1):
+            table.add_row(str(i), escape(claim.statement), ", ".join(claim.evidence))
+        console.print(table)
+    console.print(f"Evidence: {result.evidence_path}")
+    console.print(f"Diagnosis: {result.diagnosis_path}")
+
+
+eval_app = typer.Typer(help="Evaluate Guardian's agents.", no_args_is_help=True)
+app.add_typer(eval_app, name="eval")
+
+
+@eval_app.command("diagnose")
+def eval_diagnose_cmd(
+    spec: Path = typer.Argument(Path("demo/pipeline.yaml"), help="Pipeline spec to evaluate on."),
+    out: Path = typer.Option(
+        Path("bench") / "agent_eval.md", "--out", help="Markdown report (a .json goes next to it)."
+    ),
+    workdir: Path | None = typer.Option(
+        None, "--workdir", help="Keep the cases' state here (default: a temporary directory)."
+    ),
+    blocks: list[str] | None = typer.Option(None, "--block", help="Only these blocks."),
+    faults: list[str] | None = typer.Option(None, "--fault-type", help="Only these fault types."),
+    record: Path | None = typer.Option(
+        None, "--record", help="Save the model's answers, for replay with --provider fake."
+    ),
+    provider: str | None = ProviderOption,
+    model: str | None = ModelOption,
+    fake_responses: Path | None = FakeResponsesOption,
+) -> None:
+    """Diagnose a labeled fault for every block x fault type and score the answers.
+
+    Uses the configured (real) model unless --provider fake is given.
+    """
+    import tempfile
+
+    from guardian.agent.diagnose import RecordingClient
+    from guardian.agent.eval import FAULT_TYPES, generate_cases, run_eval
+
+    spec_path = find_spec(spec)
+    try:
+        pipeline = load_spec(spec_path)
+        client = make_client(_llm_config(provider, model, fake_responses))
+    except SpecError as exc:
+        console.print(f"[red]Invalid spec:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+    except GuardianError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    recorder = RecordingClient(client) if record else None
+    with tempfile.TemporaryDirectory(prefix="guardian-eval-") as tmp:
+        try:
+            cases = generate_cases(
+                pipeline,
+                workdir or Path(tmp),
+                blocks=blocks or None,
+                faults=faults or FAULT_TYPES,
+            )
+        except (KeyError, ValueError) as exc:
+            console.print(f"[red]{exc.args[0] if exc.args else exc}[/red]")
+            raise typer.Exit(code=2) from exc
+        console.print(f"Diagnosing {len(cases)} case(s) with model {escape(client.model)}...")
+        report = run_eval(cases, recorder or client)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(report.to_markdown(), encoding="utf-8", newline="\n")
+    out.with_suffix(".json").write_text(
+        json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    if recorder and record:
+        recorder.save(record)
+        console.print(f"Recorded answers: {record}")
+    correct = sum(r.correct for r in report.results)
+    console.print(
+        f"accuracy {correct}/{len(report.results)} ({report.accuracy:.1%}); "
+        f"rejected for bad citations: {report.rejected}/{len(report.results)}"
+    )
+    for fault, (c, n) in report.by_fault().items():
+        console.print(f"  {fault}: {c}/{n}")
+    console.print(f"Report: {out}")
 
 
 def main() -> None:

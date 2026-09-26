@@ -661,6 +661,200 @@ several runs, then checks `impact` for every block against four independent chec
 - the DAG (only descendants are touched, and every dependent that ran is);
 - the quality flags.
 
+## Automated diagnosis
+
+Once Guardian has contained a failure, someone still has to find out *why* it happened.
+`guardian diagnose <block> [--run <run_id>]` gathers the evidence for any block's run
+(by default its latest ROLLBACK) and asks an LLM for a root cause. The answer is
+**advisory**. The agent only reads Guardian's stores and writes under
+`.guardian/diagnoses/`. It never edits code, merges, or promotes.
+
+### The evidence bundle
+
+`guardian/agent/evidence.py` builds a bundle in which every item has a stable ID (E1, E2,
+...). The model must cite these IDs. A bundle contains:
+
+- the run's outcome;
+- each failed validation rule with its row count;
+- a capped sample of the quarantined rows (20 by default, `--sample-size`);
+- the output schema compared with the last good run and with the declared schema;
+- per-column stats (nulls, distinct values, min/max/mean or top values) for the run's
+  good rows, its bad rows and the last good snapshot;
+- whether the block's **code** changed since its last good run. Every block run now
+  records a fingerprint of the function that actually ran, and its source is kept in
+  `.guardian/code/`, so the bundle can show the diff;
+- the git log and diff of the block's source file (resolved from its `fn` path) since
+  its last promotion;
+- where each input came from on that run, and its quality (from provenance);
+- the block's DAG roles, inputs, dependents and fallback edges;
+- recent events for the block and its upstreams, taken from the DAG.
+
+The bundle is deterministic: the same stored state gives the same JSON, and later runs
+or earlier diagnoses do not change it. It is written to
+`.guardian/diagnoses/<block>/<run_id>/evidence.json`, and `--evidence-only` stops there
+without calling an LLM. Data is minimized before it can leave the machine:
+
+- samples are capped;
+- long text is cut;
+- values of the block's `redact_columns` are masked everywhere, including inside
+  validation messages and events.
+
+The demo redacts customer emails in `b1_ingest` and `b4_clean`.
+
+### The answer, and how it is checked
+
+The model must return JSON with four fields:
+
+- `root_cause`: one of `upstream_data_drift`, `schema_change`, `code_bug` or
+  `unknown`;
+- `confidence`, from 0 to 1;
+- `summary`;
+- `claims`, each citing evidence IDs.
+
+With the Anthropic client this shape is enforced as a JSON-schema structured output.
+Guardian still validates every answer:
+
+- **Invalid JSON or a malformed answer** is retried once. If it fails again, the
+  diagnosis is downgraded to `unknown` and the reason is recorded.
+- **A claim that cites an ID not in the bundle**, or cites nothing, gets the whole
+  answer rejected. The diagnosis becomes `unknown`, and the model's answer is kept
+  only as `proposed`, for audit.
+- **A refusal or an API error** is recorded as the diagnosis; it is never raised
+  into the pipeline.
+
+The result goes to `diagnosis.json` next to the evidence, and a DIAGNOSIS event is
+logged. DIAGNOSIS events are never sampled out.
+
+### Configuration
+
+The provider, model and key come from the environment, never from code:
+
+| variable | meaning |
+|---|---|
+| `GUARDIAN_LLM_PROVIDER` | `anthropic`, or `fake` to replay recorded answers |
+| `GUARDIAN_LLM_MODEL` | model name passed to the provider |
+| `GUARDIAN_LLM_API_KEY_ENV` | name of the variable holding the key (default `ANTHROPIC_API_KEY`) |
+| `GUARDIAN_LLM_FAKE_RESPONSES` | recordings file for the `fake` provider |
+| `GUARDIAN_LLM_MAX_TOKENS`, `GUARDIAN_LLM_THINKING` | optional (defaults `16000`, adaptive thinking `on`) |
+
+The Anthropic client uses the official SDK, an optional extra: `uv sync --extra agent`.
+The `--provider`, `--model` and `--fake-responses` flags override the variables.
+
+**Automatic diagnosis.** Add `auto_diagnose: true` to a block to diagnose it after every
+ROLLBACK. This works in both runners: the hook lives in core and is called from
+`complete_block`. A diagnosis that fails, for example because no provider is
+configured, is logged as a WARN event and the run carries on exactly as it would
+without it. Scenarios 9a–9c check this for every DAG role under both runners.
+
+### Example: a bad deploy of b6_enrich
+
+```
+$ guardian run demo/pipeline.yaml --run-id r1
+$ guardian run demo/pipeline.yaml --run-id r2 --fault b6_enrich:code_bug
+$ guardian diagnose b6_enrich --evidence-only
+┏━━━━━┳━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ id  ┃ kind              ┃ item                                                                     ┃
+┡━━━━━╇━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ E1  │ run_outcome       │ b6_enrich on run r2: ROLLBACK                                            │
+│ E2  │ validation_rule   │ rule order_size:isin(['small', 'medium', 'large']) failed on 222 row(s)  │
+│ E3  │ validation_rule   │ rule region:isin(['NA', 'EU']) failed on 222 row(s)                      │
+│ E4  │ quarantine_sample │ sample of 20 of 222 quarantined bad row(s)                               │
+│ E5  │ schema_diff       │ output schema vs last good run and declared schema                       │
+│ E6  │ column_stats      │ column order_id: good rows vs bad rows vs last good snapshot             │
+│ ... │                   │                                                                          │
+│ E17 │ code_change       │ the block's code on this run vs its last good run                        │
+│ E18 │ git_history       │ git history of the block's source since its last promotion               │
+│ E19 │ input             │ input b5_normalize: FRESH                                                │
+│ E20 │ dag               │ b6_enrich's place in the DAG                                             │
+│ E21 │ event             │ QUARANTINE event for b1_ingest on r1                                     │
+│ ... │                   │                                                                          │
+│ E40 │ event             │ ROLLBACK event for b6_enrich on r2                                       │
+└─────┴───────────────────┴──────────────────────────────────────────────────────────────────────────┘
+```
+
+Two of those items, as written to `evidence.json` (trimmed):
+
+```json
+{"id": "E2", "kind": "validation_rule", "data": {"rule": "order_size:isin(['small', 'medium', 'large'])",
+  "rows": 222, "fraction_of_output": 0.5011, "example_reasons": ["column 'region' failed isin(['NA', 'EU'])
+  (value='EU '); column 'order_size' failed isin(['small', 'medium', 'large']) (value='large ')", ...]}}
+{"id": "E17", "kind": "code_change", "data": {"changed": true, "last_good_run": "r1",
+  "last_good": {"function": "guardian.demo.blocks:enrich", "fingerprint": "cbadb335608d8be1", ...},
+  "this_run": {"function": "guardian.demo.refactor:rewrite.<locals>.block", ...},
+  "diff": ["--- last good (guardian.demo.blocks:enrich)", "+++ this run (...)",
+           "-    out[\"region\"] = out[\"country\"].map(REGION_BY_COUNTRY)", ...,
+           "+                out.iloc[selected, j] = values.iloc[selected].map(",
+           "+                    lambda v: v + \" \" if isinstance(v, str) else v", ...]}}
+```
+
+With a provider configured, `guardian diagnose b6_enrich` prints the answer below. This
+particular answer is **not** model output. No API key was available where this README
+was written, so it is a hand-written recording, replayed with `--provider fake`, that
+shows the format. Replace it with a real run once one exists.
+
+```
+$ guardian diagnose b6_enrich
+Diagnosis of b6_enrich on r2 (advisory, model illustration)
+root cause: code_bug   confidence: 0.85   status: accepted
+b6_enrich's code changed between r1 and r2; half its rows now carry padded category labels while its
+input and output schema are unchanged.
+┏━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┓
+┃ # ┃ claim                                                                           ┃ evidence   ┃
+┡━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━┩
+│ 1 │ 222 of 443 rows fail region and order_size isin checks, with values like 'EU '  │ E1, E2, E3 │
+│   │ and 'large '.                                                                   │            │
+│ 2 │ The output has the same columns as the last good run.                           │ E5         │
+│ 3 │ The function that ran differs from the one that produced r1.                    │ E17        │
+│ 4 │ The input was a fresh, healthy b5_normalize snapshot.                           │ E19        │
+└───┴─────────────────────────────────────────────────────────────────────────────────┴────────────┘
+Evidence: .guardian/diagnoses/b6_enrich/r2/evidence.json
+Diagnosis: .guardian/diagnoses/b6_enrich/r2/diagnosis.json
+```
+
+### Evaluation
+
+`guardian eval diagnose` builds one labeled case for **every block × fault type**. It
+runs the pipeline once cleanly, then, for each case, copies that state, injects the
+fault into the block, re-runs it and builds the bundle:
+
+| fault | what it does | label |
+|---|---|---|
+| `schema_drift` | renames a required column of the block's output | `schema_change` |
+| `corrupt_rows` | writes invalid values into half the rows | `upstream_data_drift` |
+| `null_burst` | nulls a non-nullable column in half the rows | `upstream_data_drift` |
+| `code_bug` | swaps in a buggy rewrite of the block's function (new code, same input) | `code_bug` |
+
+Columns are chosen from each block's clean output and declared schema, never by name.
+The report gives:
+
+- accuracy overall, by DAG role and by fault type;
+- a confusion matrix;
+- the rate of answers rejected for bad citations.
+
+It is written to `bench/agent_eval.md`, with a `.json` next to it. `--record FILE`
+saves the model's answers, so a real run can later be replayed offline with
+`--provider fake --fake-responses FILE`.
+
+In pytest the eval only ever runs against `FakeClient`, with no network. The tests
+check two things:
+
+- every case really fails, and its bundle carries the signal that separates its label
+  (a schema diff, a code change, or neither). A correct diagnosis is possible from the
+  evidence alone, and the fault's name never appears in it;
+- the metrics, confusion matrix and rejection rate match an independent tally of
+  scripted answers: correct and wrong causes, bad citations, invalid JSON.
+
+**Real-model results: not yet recorded.** The table is produced by:
+
+```
+GUARDIAN_LLM_PROVIDER=anthropic GUARDIAN_LLM_MODEL=<model> ANTHROPIC_API_KEY=... \
+  uv run guardian eval diagnose --record bench/agent_eval_answers.json
+```
+
+No API key was available in the environment that built this phase, so no numbers are
+reported here rather than invented ones. Paste the summary table from
+`bench/agent_eval.md` here after the first run.
+
 ## Design decisions
 
 ### Why the core is orchestrator-agnostic
@@ -804,18 +998,22 @@ with the min to max range. Full details, machine specs and raw samples are in
 ```
 guardian/
   core/        models, validation, snapshots, quarantine, events, planner, versions,
+               code (fingerprints), dag (roles),
                shadow, provenance, guardian facade
   runner/      spec_loader, executor, cli
   adapters/dagster/  io_manager, checks, replay, definitions
-  demo/        data_gen, schemas, blocks, faults, pipeline.yaml
+  agent/       evidence bundles, LLM diagnosis (Anthropic + fake clients), eval
+  demo/        data_gen, schemas, blocks, faults, refactor (code_bug), pipeline.yaml
 bench/
   run_bench.py throughput / recovery / overhead benchmarks -> bench/results.md
+  agent_eval.md  written by `guardian eval diagnose` (real model; manual)
 tests/
   helpers/     blocks_by_role (DAG roles) and block profiles, shared by the tests
   unit/        per-module core tests, invariant property test, layering test, role helper
   runner/      spec loader, executor, CLI
   demo/        demo blocks and fault injection
   adapters/    Dagster adapter wiring
+  agent/       evidence, diagnosis validation and clients, eval (FakeClient only)
   scenarios/   fault-injection suite, parametrized over DAG roles and both runners
   bench/       smoke test for the benchmark script
 ```

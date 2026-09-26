@@ -218,3 +218,18 @@ def test_annotate_quality_flag() -> None:
     assert parse_spec(spec({"name": "a", "fn": "m:f"})).block("a").annotate_quality is False
     with pytest.raises(SpecError, match="true or false"):
         parse_spec(spec({"name": "a", "fn": "m:f", "annotate_quality": "yes"}))
+
+
+def test_auto_diagnose_and_redact_columns() -> None:
+    s = parse_spec(
+        spec({"name": "a", "fn": "m:f", "auto_diagnose": True, "redact_columns": ["email"]})
+    )
+    assert s.block("a").auto_diagnose is True
+    assert s.block("a").redact_columns == ("email",)
+    plain = parse_spec(spec({"name": "a", "fn": "m:f"})).block("a")
+    assert plain.auto_diagnose is False and plain.redact_columns == ()
+    with pytest.raises(SpecError, match="true or false"):
+        parse_spec(spec({"name": "a", "fn": "m:f", "auto_diagnose": "yes"}))
+    for bad in ("email", [1], [""]):
+        with pytest.raises(SpecError, match="redact_columns"):
+            parse_spec(spec({"name": "a", "fn": "m:f", "redact_columns": bad}))

@@ -25,6 +25,8 @@ _BLOCK_KEYS = {
     "load",
     "shadow",
     "annotate_quality",
+    "auto_diagnose",
+    "redact_columns",
 }
 _SHADOW_KEYS = {"required_runs", "max_changed_fraction", "min_pass_rate"}
 _FALLBACK_KEYS = {"replaces", "source", "adapter"}
@@ -122,6 +124,9 @@ def _parse_block(raw: Mapping[str, Any], where: str) -> BlockSpec:
         not isinstance(merge_key, list) or not all(isinstance(c, str) for c in merge_key)
     ):
         raise SpecError(f"{where}: 'merge_key' must be a list of column names")
+    redact = raw.get("redact_columns") or []
+    if not isinstance(redact, list) or not all(isinstance(c, str) and c for c in redact):
+        raise SpecError(f"{where}: 'redact_columns' must be a list of column names")
     fallbacks_raw = raw.get("fallbacks") or []
     if not isinstance(fallbacks_raw, list):
         raise SpecError(f"{where}: 'fallbacks' must be a list")
@@ -144,6 +149,8 @@ def _parse_block(raw: Mapping[str, Any], where: str) -> BlockSpec:
             load=load,
             shadow=ShadowPolicy(**shadow_raw),
             annotate_quality=_flag(raw, "annotate_quality", where),
+            auto_diagnose=_flag(raw, "auto_diagnose", where),
+            redact_columns=tuple(redact),
         )
     except ValueError as exc:
         if isinstance(exc, SpecError):

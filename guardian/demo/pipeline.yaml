@@ -10,6 +10,11 @@
 # identical on well-formed data) and v_bad (subtly wrong: an off-by-one), for shadow
 # promotion (`guardian shadow start <block> <version>`).
 #
+# Diagnosis: `guardian diagnose <block>` works for every block. Values of a block's
+# `redact_columns` are masked in anything sent to an LLM (here: customer emails). Add
+# `auto_diagnose: true` to a block to diagnose it automatically after a ROLLBACK
+# (needs GUARDIAN_LLM_PROVIDER and GUARDIAN_LLM_MODEL; it never fails a run).
+#
 # DAG roles (tests pick blocks by role, see tests/helpers/roles.py):
 #   source: b1   leaf: b7, b8   fallback_protected: b6   fallback_source: b5
 #   multi_dependent: b5   unprotected: b1-b5
@@ -23,6 +28,7 @@ blocks:
       v_bad: demo.blocks:ingest_bad
     active: v1
     merge_key: [order_id]
+    redact_columns: [email]
     schema: demo.schemas:RawSchema
     quarantine_threshold: 0.2
     params:
@@ -51,6 +57,7 @@ blocks:
   - name: b4_clean
     fn: demo.blocks:clean
     merge_key: [order_id]
+    redact_columns: [email, email_clean]
     inputs: [b3_standardize]
     schema: demo.schemas:CleanSchema
     quarantine_threshold: 0.2
