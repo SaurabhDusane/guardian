@@ -84,10 +84,9 @@ class Executor:
     def _run_one(self, block: str, run_id: str) -> BlockReport:
         g = self.guardian
         spec = g.spec.block(block)
-        if g.status(block) is BlockStatus.OUT:
-            return BlockReport(
-                block, Outcome.SKIPPED, BlockStatus.OUT, reason="taken out (status OUT)"
-            )
+        skip = g.skip_reason(block)
+        if skip is not None:
+            return BlockReport(block, Outcome.SKIPPED, g.status(block), reason=skip)
 
         started = time.perf_counter()
         g.events.emit(EventKind.BLOCK_STARTED, block=block, run_id=run_id)
@@ -108,7 +107,8 @@ class Executor:
                 seconds=time.perf_counter() - started,
             )
 
-        decision = g.run_block(block, run_id, frames)
+        decision = g.handle_result(block, run_id, g.compute(block, frames))
+        assert decision is not None  # not skipped: checked above, inputs all resolved
         passed = decision.action is Action.PASS
         report = BlockReport(
             block=block,

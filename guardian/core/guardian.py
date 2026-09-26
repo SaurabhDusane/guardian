@@ -19,6 +19,8 @@ from guardian.core.events import EventKind, EventLogger
 from guardian.core.models import (
     DEFAULT_STORAGE_ROOT,
     Action,
+    BlockCrash,
+    BlockSkipped,
     BlockStatus,
     DataRef,
     Decision,
@@ -110,6 +112,7 @@ class Guardian:
         self.statuses = statuses or JsonBlockStatusStore(self.root)
         self.registry = dict(registry or {})
         self._validators: dict[str, Validator] = {}
+        self.decisions: dict[tuple[str, str], Decision] = {}
 
     # ------------------------------------------------------------------ plumbing
 
@@ -178,18 +181,61 @@ class Guardian:
 
     # ------------------------------------------------------------------ outputs
 
-    def run_block(self, block: str, run_id: str, inputs: Sequence[pd.DataFrame] = ()) -> Decision:
-        """Call the block's function on ``inputs`` and hand the result to on_output.
+    def skip_reason(self, block: str) -> str | None:
+        """Why ``block`` must not run this time, or None if it should run."""
+        if self.status(block) is BlockStatus.OUT:
+            return "taken out (status OUT)"
+        return None
 
-        An exception from the function becomes a ROLLBACK with reason "crash".
+    def compute(self, block: str, inputs: Sequence[Any] = ()) -> Any:
+        """Run ``block``'s function; never raises for block failures.
+
+        Returns the output DataFrame, a ``BlockCrash`` if the function raised or did
+        not return a DataFrame, or a ``BlockSkipped`` if the block is OUT or any input
+        is itself a ``BlockSkipped`` (no safe input could be resolved).
         """
+        reason = self.skip_reason(block)
+        if reason is not None:
+            return BlockSkipped(reason)
+        for item in inputs:
+            if isinstance(item, BlockSkipped):
+                return BlockSkipped(item.reason, blocked=True)
         try:
             out = self.block_fn(block)(*inputs)
             if not isinstance(out, pd.DataFrame):
                 raise TypeError(f"block {block!r} returned {type(out).__name__}, not DataFrame")
         except Exception as exc:
-            return self.on_crash(block, run_id, exc)
-        return self.on_output(block, run_id, out)
+            return BlockCrash(exc)
+        return out
+
+    def handle_result(self, block: str, run_id: str, result: Any) -> Decision | None:
+        """Dispatch a ``compute`` result: DataFrame -> on_output, crash -> on_crash.
+
+        Skipped blocks produce no decision. Decisions are also kept in
+        ``self.decisions`` so adapters can report them after the fact.
+        """
+        if isinstance(result, BlockSkipped):
+            return None
+        if isinstance(result, BlockCrash):
+            decision = self.on_crash(block, run_id, result.error)
+        elif isinstance(result, pd.DataFrame):
+            decision = self.on_output(block, run_id, result)
+        else:
+            raise TypeError(f"unexpected result for block {block!r}: {type(result).__name__}")
+        self.decisions[(block, run_id)] = decision
+        return decision
+
+    def run_block(self, block: str, run_id: str, inputs: Sequence[pd.DataFrame] = ()) -> Decision:
+        """Call the block's function on ``inputs`` and hand the result to on_output.
+
+        An exception from the function becomes a ROLLBACK with reason "crash".
+        """
+        result = self.compute(block, inputs)
+        if isinstance(result, BlockSkipped):
+            raise ValueError(f"block {block!r} cannot run: {result.reason}")
+        decision = self.handle_result(block, run_id, result)
+        assert decision is not None
+        return decision
 
     def on_crash(self, block: str, run_id: str, error: BaseException) -> Decision:
         self.spec.block(block)

@@ -206,3 +206,18 @@ class ReplayResult:
     replayed: int
     still_failing: int
     snapshot: DataRef | None = None
+
+
+@dataclass(frozen=True)
+class BlockCrash:
+    """The block function raised; carried as a value so execution can continue."""
+
+    error: BaseException
+
+
+@dataclass(frozen=True)
+class BlockSkipped:
+    """The block did not run: taken OUT, or ``blocked`` because an input had no safe source."""
+
+    reason: str
+    blocked: bool = False

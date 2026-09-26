@@ -166,3 +166,70 @@ class StandaloneRunner(ScenarioRunner):
     def replay(self, block: str) -> ReplayResult:
         with self._acting_guardian() as g:
             return g.replay(block)
+
+
+class DagsterRunner(ScenarioRunner):
+    """Runs the same spec through the Dagster adapter with in-process execution."""
+
+    name = "dagster"
+
+    def _execute(self, job_name: str, **kwargs: Any) -> Any:
+        from guardian.adapters.dagster import build_definitions
+
+        self.close()
+        spec, registry = StandaloneRunner._faulted(self)  # same fault wiring
+        with Guardian(spec, self.root, registry=registry) as g:
+            defs = build_definitions(g)
+            result = defs.resolve_job_def(job_name).execute_in_process(
+                raise_on_error=False, **kwargs
+            )
+            if not result.success:
+                failures = [e.message for e in result.all_events if e.is_failure]
+                raise AssertionError(f"dagster job {job_name} failed: {failures}")
+            return result
+
+    def run(self, run_id: str) -> RunResult:
+        from guardian.adapters.dagster import PIPELINE_JOB
+        from guardian.adapters.dagster.io_manager import RUN_ID_TAG
+
+        result = self._execute(PIPELINE_JOB, tags={RUN_ID_TAG: run_id})
+        outcomes = {
+            ev.asset_key.to_user_string(): ev.metadata["outcome"].value
+            for ev in result.get_asset_check_evaluations()
+        }
+        resolved = self.events(EventKind.RESOLVE, run_id=run_id) + self.events(
+            EventKind.REROUTE, run_id=run_id
+        )
+        out: RunResult = {}
+        for block in self.spec.blocks:
+            by_upstream = {e.data["upstream"]: e for e in resolved if e.block == block.name}
+            sources = tuple(
+                DataRef(
+                    block=e.data["source"],
+                    run_id=e.data["source_run_id"],
+                    requested=e.data["upstream"],
+                    adapter=e.data["adapter"],
+                    stale=e.data["stale"],
+                )
+                for up in block.inputs
+                if (e := by_upstream.get(up)) is not None
+            )
+            out[block.name] = BlockResult(outcomes[block.name], sources)
+        return out
+
+    def set_block_status(self, block: str, status: BlockStatus) -> None:
+        # A human action, not part of a Dagster run: it goes straight to core.
+        self.close()
+        with Guardian(self.spec, self.root) as g:
+            g.set_block_status(block, status)
+
+    def replay(self, block: str) -> ReplayResult:
+        from guardian.adapters.dagster import REPLAY_JOB
+        from guardian.adapters.dagster.replay import replay_run_config
+
+        result = self._execute(REPLAY_JOB, run_config=replay_run_config(block))
+        summary = result.output_for_node("guardian_replay_op")
+        snapshot = (
+            DataRef(block, summary["snapshot_run_id"]) if summary["snapshot_run_id"] else None
+        )
+        return ReplayResult(block, summary["replayed"], summary["still_failing"], snapshot)
