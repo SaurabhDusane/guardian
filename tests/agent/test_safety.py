@@ -64,6 +64,7 @@ def test_agent_view_forbids_every_state_change(guardian, method: str) -> None:
         ("snapshots", "mark_last_good"),
         ("quarantine", "add"),
         ("quarantine", "mark_replayed"),
+        ("drift", "write"),
     ],
 )
 def test_agent_view_forbids_store_writes(guardian, store: str, method: str) -> None:

@@ -55,8 +55,10 @@ def test_always_logged_set_matches_contract() -> None:
     # so warnings such as "replay merge skipped" cannot be sampled away.
     # PROMOTION joins them: every change of a block's active version must be auditable.
     # DIAGNOSIS and PROPOSAL join them: every (advisory) agent action must be auditable.
+    # DRIFT joins them: a drift warning is a soft failure and must never be sampled away.
     assert {k.value for k in ALWAYS_LOGGED} == {
         "DIAGNOSIS",
+        "DRIFT",
         "PROPOSAL",
         "PROMOTION",
         "WARN",

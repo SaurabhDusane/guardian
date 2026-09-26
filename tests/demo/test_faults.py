@@ -138,3 +138,22 @@ def test_code_bug_swaps_the_implementation(df) -> None:
     assert fingerprint(buggy, "r").sha != fingerprint(block, "r").sha
     # Data faults wrap the implementation: the fingerprint is unchanged.
     assert fingerprint(inject(block, corrupt_rows(0.5)), "r").sha == fingerprint(block, "r").sha
+
+
+def test_drift_fault_skews_with_existing_values(df) -> None:
+    from guardian.core.models import BlockSpec
+    from guardian.demo.faults import drift
+
+    frame = df.assign(n=range(20), x=[float(i) for i in range(20)], s=list("ab" * 10))
+    out = drift(0.5, seed=1)(frame)
+    rows = pick_positions(20, 0.5, 1)
+    assert (out["x"].iloc[rows] == 19.0).all() and (out["n"].iloc[rows] == 19).all()
+    assert out["s"].iloc[rows].nunique() == 1 and out["s"].iloc[rows].iloc[0] in ("a", "b")
+    assert out["t"].equals(frame["t"])  # datetimes untouched
+    assert set(out["s"]) <= set(frame["s"]) and out["x"].max() <= frame["x"].max()
+
+    bound = drift(0.5, seed=1).for_block(BlockSpec("b", "m:f", merge_key=("n",)))
+    kept = bound(frame)
+    assert kept["n"].equals(frame["n"])  # the merge key is row identity: left alone
+    _, parsed = parse_fault("b:drift:0.3")
+    assert parsed.name == "drift(0.3)" and parsed.for_block is not None

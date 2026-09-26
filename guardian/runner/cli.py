@@ -1,5 +1,5 @@
 """Command-line entry point: `guardian run|replay|status|set-status|shadow|impact|lineage|
-diagnose|propose|eval`."""
+drift|diagnose|propose|eval`."""
 
 from __future__ import annotations
 
@@ -537,6 +537,67 @@ def render_lineage(root: LineageNode) -> Tree:
 
     add(tree, root)
     return tree
+
+
+@app.command("drift")
+def drift_cmd(
+    block: str = typer.Argument(..., help="Any block in the spec."),
+    run: str | None = typer.Option(
+        None, "--run", help="Run to show (default: the block's latest checked run)."
+    ),
+    spec: Path | None = SpecOption,
+    root: Path = RootOption,
+) -> None:
+    """Show BLOCK's statistical drift check for a run: PSI and z-score per column."""
+    with _guarded(root, spec) as g:
+        if g.spec.block(block).drift is None:
+            console.print(f"{block} has no drift policy (add `drift:` to it in the spec).")
+            raise typer.Exit(code=1)
+        runs = [run] if run else [r.run_id for r in reversed(g.provenance.runs(block))]
+        report = next((r for r in (g.drift.get(block, x) for x in runs) if r), None)
+        if report is None:
+            console.print(
+                f"[red]no drift check recorded for {block}"
+                + (f" on {run}" if run else "")
+                + "[/red]"
+            )
+            raise typer.Exit(code=1)
+        style = {"FAIL": "red", "WARN": "yellow"}.get(report["level"], "green")
+        reference = ", ".join(report["reference_runs"]) or "-"
+        table = Table(title=f"Drift of {block} on {report['run_id']} vs {reference}")
+        for column in (
+            "column",
+            "kind",
+            "PSI",
+            "z",
+            "nulls ref -> now",
+            "mean ref -> now",
+            "level",
+        ):
+            table.add_column(column)
+        order = {"FAIL": 0, "WARN": 1}
+        for c in sorted(report["columns"], key=lambda c: (order.get(c["level"], 2), -c["psi"])):
+            mean = (
+                f"{c['mean_ref']:.4g} -> {c['mean_now']:.4g}"
+                if c.get("mean_ref") is not None and c.get("mean_now") is not None
+                else ""
+            )
+            level_style = {"FAIL": "red", "WARN": "yellow"}.get(c["level"], "green")
+            table.add_row(
+                escape(c["column"]),
+                c["kind"],
+                f"{c['psi']:.3f}",
+                "" if c["z"] is None else f"{c['z']:.2f}",
+                f"{c['null_rate_ref']:.1%} -> {c['null_rate_now']:.1%}",
+                mean,
+                f"[{level_style}]{c['level']}[/]",
+            )
+        console.print(table)
+        policy = report["policy"]
+        console.print(
+            f"[{style}]{report['level']}[/]: {escape(report['reason'])}  "
+            f"(warn: {policy['warn']}, fail: {policy['fail']})"
+        )
 
 
 ProviderOption = typer.Option(

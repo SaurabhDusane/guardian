@@ -18,6 +18,8 @@ import numpy as np
 import pandas as pd
 
 from guardian.core.code import CodeFingerprint, CodeStore, fingerprint
+from guardian.core.drift import DRIFT_RULE, DriftLevel, DriftReport, DriftStore
+from guardian.core.drift import check as check_drift
 from guardian.core.events import EventKind, EventLogger
 from guardian.core.models import (
     DEFAULT_STORAGE_ROOT,
@@ -158,6 +160,7 @@ class Guardian:
         self.versions = VersionRegistry(self.root)
         self.provenance = provenance or DuckDBProvenanceStore(self.root)
         self.code = CodeStore(self.root)
+        self.drift = DriftStore(self.root)
         self._code_cache: dict[str, tuple[Any, CodeFingerprint]] = {}
         # Called as diagnoser(guardian, block, run_id) after a ROLLBACK of a block with
         # ``auto_diagnose``. Advisory only: whatever it does or raises, the run goes on.
@@ -472,6 +475,21 @@ class Guardian:
             return decision
 
         fraction = n_bad / total if total else 0.0
+        if fraction <= spec.quarantine_threshold and spec.drift is not None:
+            report = self._check_drift(block, run_id, result.good)
+            if report.level is DriftLevel.FAIL:
+                # A soft failure: every row is schema-valid, but the output as a whole no
+                # longer looks like this block's output. Treated like a validation
+                # failure: nothing is promoted and every row is quarantined.
+                reason = report.reason
+                drifted = _with_rule(df.iloc[~_bad_mask(df, result)], DRIFT_RULE, reason)
+                self._quarantine(block, run_id, pd.concat([result.bad, drifted]), df)
+                self._record_output(provenance, has_snapshot=False)
+                decision = self._rollback(
+                    block, run_id, reason, total=total, good=n_good, bad=n_bad
+                )
+                self._record_run(block, run_id, "ROLLBACK", reason)
+                return decision
         if fraction <= spec.quarantine_threshold:
             good = result.good
             if spec.annotate_quality:  # opt-in: user frames are never changed by default
@@ -496,6 +514,37 @@ class Guardian:
         decision = self._rollback(block, run_id, reason, total=total, good=n_good, bad=n_bad)
         self._record_run(block, run_id, "ROLLBACK", reason)
         return decision
+
+    def drift_reference(self, block: str, run_id: str) -> list[tuple[str, pd.DataFrame]]:
+        """The block's last ``drift.window`` promoted run snapshots before ``run_id``."""
+        policy = self.spec.block(block).drift
+        window = policy.window if policy is not None else 0
+        runs = [
+            r.run_id
+            for r in self.provenance.runs(block)
+            if r.outcome == "PASS" and r.run_id != run_id and self.snapshots.exists(block, r.run_id)
+        ]
+        return [(r, self.snapshots.read(block, r)) for r in runs[-window:]] if window else []
+
+    def _check_drift(self, block: str, run_id: str, good: pd.DataFrame) -> DriftReport:
+        report = check_drift(
+            self.spec.block(block), run_id, good, self.drift_reference(block, run_id)
+        )
+        self.drift.write(report)
+        if report.level in (DriftLevel.WARN, DriftLevel.FAIL):
+            self.events.emit(
+                EventKind.DRIFT,
+                block=block,
+                run_id=run_id,
+                level=report.level.value,
+                reason=report.reason,
+                columns={
+                    c.column: {"psi": c.psi, "z": c.z, "level": c.level.value}
+                    for c in report.drifted
+                },
+                reference_runs=list(report.reference_runs),
+            )
+        return report
 
     def _rollback(
         self, block: str, run_id: str, reason: str, *, total: int, good: int, bad: int

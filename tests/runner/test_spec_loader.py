@@ -250,3 +250,40 @@ def test_demo_blocks_all_declare_unit_tests() -> None:
         assert block.tests == (
             f"tests/demo/test_block_contracts.py::test_block_contract[{block.name}]",
         )
+
+
+def test_drift_policy() -> None:
+    assert parse_spec(spec({"name": "a", "fn": "m:f"})).block("a").drift is None
+    default = parse_spec(spec({"name": "a", "fn": "m:f", "drift": True})).block("a").drift
+    assert default is not None and default.window == 5 and default.fail.psi == 0.25
+    custom = (
+        parse_spec(
+            spec(
+                {
+                    "name": "a",
+                    "fn": "m:f",
+                    "drift": {
+                        "window": 3,
+                        "min_history": 1,
+                        "warn": {"psi": 0.2},
+                        "fail": {"psi": 0.4, "z": 8},
+                        "exclude": ["id"],
+                    },
+                }
+            )
+        )
+        .block("a")
+        .drift
+    )
+    assert (custom.window, custom.warn.psi, custom.warn.z, custom.fail.z) == (3, 0.2, None, 8.0)
+    assert custom.exclude == ("id",)
+    for bad, match in (
+        ("yes", "must be true or a mapping"),
+        ({"windw": 3}, "unknown key"),
+        ({"warn": 0.1}, "psi and/or z"),
+        ({"warn": {"psi": 0.5}, "fail": {"psi": 0.1}}, "must not exceed"),
+        ({"columns": "a"}, "list of column names"),
+        ({"window": 0}, "positive integer"),
+    ):
+        with pytest.raises(SpecError, match=match):
+            parse_spec(spec({"name": "a", "fn": "m:f", "drift": bad}))

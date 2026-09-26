@@ -661,6 +661,103 @@ several runs, then checks `impact` for every block against four independent chec
 - the DAG (only descendants are touched, and every dependent that ran is);
 - the quality flags.
 
+## Drift detection
+
+Validation catches rows that are *wrong*. Some failures are only visible in aggregate:
+every row passes the schema, but the output as a whole no longer looks like the block's
+output. Examples: a currency feed stuck on one value, amounts that doubled, a category
+that quietly took over. Any block can opt into statistical drift detection:
+
+```yaml
+- name: b6_enrich
+  drift: true                 # defaults, or:
+  # drift:
+  #   window: 5               # learn from the last 5 promoted snapshots
+  #   min_history: 2          # no verdict until 2 exist
+  #   warn: {psi: 0.1, z: 3}  # log a DRIFT event
+  #   fail: {psi: 0.25, z: 6} # treat as a validation failure (ROLLBACK)
+  #   columns: [...]          # default: numeric + categorical (<= max_categories values)
+  #   exclude: [...]
+```
+
+**Profile.** Guardian learns a profile from the block's last `window` promoted
+snapshots, the runs it PASSed. Per column it records the null rate and, for numeric
+columns, the mean, std and quantile bins; for categorical ones, the category
+frequencies. Merge-key columns are not profiled (they are row identity, not a
+distribution), and neither are datetimes or text with more than `max_categories`
+distinct values.
+
+**Score.** After validation passes, each run's good rows are scored against the
+profile:
+
+- **PSI** (population stability index) for every tracked column. Categorical columns
+  compare category shares; numeric columns compare the share of rows in each of the
+  profile's quantile bins. Nulls get a bin of their own, so a null burst moves the PSI
+  too, and an unseen category counts as `__other__`.
+- **z-score** of the mean shift for numeric columns: `|mean_now − mean_ref| / (std_ref /
+  √n)`. It is a sensitive test on large outputs; set `z` to `null` (or raise it) to rely
+  on PSI alone.
+
+**Verdict.** A column reaching a `warn` threshold makes the run WARN; reaching a `fail`
+threshold makes it FAIL:
+
+- **WARN** logs a DRIFT event (never sampled out), and the output is promoted.
+- **FAIL** is handled exactly like a validation failure: nothing is promoted, the block
+  becomes DEGRADED, dependents read the fallback or the stale last good snapshot, and
+  every row is quarantined with rule `drift`. No row is lost. If the new distribution is
+  in fact correct, replaying the block accepts it (`guardian replay`): replay
+  re-validates rows but does not re-check drift, so it is the human override.
+
+Every check is written to `.guardian/drift/<block>/<run_id>.json`. `guardian drift
+<block> [--run <run_id>]` shows it for any block. The agent's evidence bundle gains a
+`drift` item with each column's PSI and z, the thresholds and the reference runs;
+redacted columns show scores only, never values.
+
+### Example
+
+The demo turns drift detection on for `b6_enrich`. The `drift` fault skews an output
+while keeping every row schema-valid. In half the rows each column takes a value it
+already holds elsewhere (a number's maximum, a category's most frequent value), and the
+merge key is left alone:
+
+```
+$ guardian run demo/pipeline.yaml --run-id r1   # r1..r3: clean, the baseline
+$ guardian run demo/pipeline.yaml --run-id r4 --fault b6_enrich:drift
+  ... b6_enrich │ ROLLBACK │ DEGRADED │ 443 │ 0 │ 443 │ b5_normalize │ distribution drift: ...
+$ guardian drift b6_enrich
+                           Drift of b6_enrich on r4 vs r1, r2, r3
+┏━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━┳━━━━━━━┳━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━┓
+┃ column         ┃ kind        ┃ PSI   ┃ z     ┃ nulls ref -> now ┃ mean ref -> now ┃ level ┃
+┡━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━╇━━━━━━━╇━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━┩
+│ amount_usd     │ numeric     │ 1.088 │ 59.11 │ 0.0% -> 0.0%     │ 92.42 -> 286.3  │ FAIL  │
+│ unit_price_usd │ numeric     │ 1.054 │ 62.98 │ 0.0% -> 0.0%     │ 60.87 -> 237.4  │ FAIL  │
+│ quantity       │ numeric     │ 0.975 │ 20.41 │ 0.0% -> 0.0%     │ 2.005 -> 3.016  │ FAIL  │
+│ country        │ categorical │ 0.498 │       │ 0.0% -> 0.0%     │                 │ FAIL  │
+│ status         │ categorical │ 0.264 │       │ 0.0% -> 0.0%     │                 │ FAIL  │
+│ order_size     │ categorical │ 0.204 │       │ 0.0% -> 0.0%     │                 │ WARN  │
+│ region         │ categorical │ 0.137 │       │ 0.0% -> 0.0%     │                 │ WARN  │
+│ segment        │ categorical │ 0.098 │       │ 0.0% -> 0.0%     │                 │ OK    │
+└────────────────┴─────────────┴───────┴───────┴──────────────────┴─────────────────┴───────┘
+FAIL: distribution drift: amount_usd (PSI 1.088 >= 0.25; z 59.11 >= 6.0), unit_price_usd (PSI 1.054
+>= 0.25; z 62.98 >= 6.0), quantity (PSI 0.975 >= 0.25; z 20.41 >= 6.0) and 4 more
+```
+
+The clean run r3 scores PSI 0.000 on every column. `order_id` (the merge key) and
+`customer_id` (too many distinct values) are not tracked.
+
+**How it is tested.** Scenario 11 runs for every DAG role, under both runners
+([`tests/scenarios/test_drift.py`](tests/scenarios/test_drift.py)):
+
+- **11a:** with schema validation alone, the drifted output is promoted, with nothing
+  quarantined.
+- **11b:** with a drift policy, the same fault is a ROLLBACK. Dependents follow the
+  fallback/stale rules, the no-silent-loss invariants hold, a FAIL DRIFT event is
+  logged, and the evidence bundle carries the drift details.
+- **11c:** below the fail threshold, it only WARNs.
+
+Unit tests cover the PSI and z maths, null bursts, unseen categories, thresholds,
+history windows and the policy validation.
+
 ## Automated diagnosis
 
 Once Guardian has contained a failure, someone still has to find out *why* it happened.
@@ -678,6 +775,7 @@ Once Guardian has contained a failure, someone still has to find out *why* it ha
 - each failed validation rule with its row count;
 - a capped sample of the quarantined rows (20 by default, `--sample-size`);
 - the output schema compared with the last good run and with the declared schema;
+- the run's drift check (PSI and z per column), if the block has a drift policy;
 - per-column stats (nulls, distinct values, min/max/mean or top values) for the run's
   good rows, its bad rows and the last good snapshot;
 - whether the block's **code** changed since its last good run. Every block run now
@@ -1169,7 +1267,7 @@ with the min to max range. Full details, machine specs and raw samples are in
 ```
 guardian/
   core/        models, validation, snapshots, quarantine, events, planner, versions,
-               code (fingerprints), dag (roles),
+               code (fingerprints), dag (roles), drift (profiles, PSI/z-score),
                shadow, provenance, guardian facade
   runner/      spec_loader, executor, cli
   adapters/dagster/  io_manager, checks, replay, definitions

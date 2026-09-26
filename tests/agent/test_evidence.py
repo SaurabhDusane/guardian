@@ -314,3 +314,26 @@ def test_git_history_of_a_source_file(tmp_path) -> None:
     outside.write_text("x = 1\n", encoding="utf-8")
     assert git_history(str(outside), since)["available"] is False
     assert git_history(None, since)["available"] is False
+
+
+@by_role
+def test_drift_details_are_evidence_and_redacted(tmp_path, role: str) -> None:
+    from guardian.core.models import DriftPolicy
+    from guardian.demo.faults import drift
+
+    block = representative(SPEC, role)
+    root = tmp_path / "g"
+    run(root, SPEC, "r0")
+    with Guardian(SPEC, root) as g:
+        columns = [c for c in g.snapshots.read(block, "r0").columns if c != QUALITY_COL]
+    spec = with_block(SPEC, block, drift=DriftPolicy(min_history=1), redact_columns=tuple(columns))
+    run(root, spec, "r1")
+    report = run(root, spec, "r2", {block: [drift()]})
+    assert report.get(block).outcome.value == "ROLLBACK"
+    b = bundle(root, block, spec=spec)
+    (item,) = b.of_kind("drift")
+    assert item.data["level"] == "FAIL" and "r1" in item.data["reference_runs"]
+    assert item.data["columns"] and item.data["columns"][0]["level"] == "FAIL"
+    for column in item.data["columns"]:
+        assert column["top_now"] in (REDACTED, []) and column["mean_now"] in (REDACTED, None)
+    assert b.of_kind("validation_rule")[0].data["rule"] == "drift"

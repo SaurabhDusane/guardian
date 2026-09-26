@@ -8,7 +8,14 @@ from typing import Any
 
 import yaml
 
-from guardian.core.models import BlockSpec, FallbackEdge, PipelineSpec, ShadowPolicy
+from guardian.core.models import (
+    BlockSpec,
+    DriftPolicy,
+    DriftThresholds,
+    FallbackEdge,
+    PipelineSpec,
+    ShadowPolicy,
+)
 
 _PIPELINE_KEYS = {"name", "blocks"}
 _BLOCK_KEYS = {
@@ -28,9 +35,21 @@ _BLOCK_KEYS = {
     "auto_diagnose",
     "redact_columns",
     "tests",
+    "drift",
 }
 _SHADOW_KEYS = {"required_runs", "max_changed_fraction", "min_pass_rate"}
 _FALLBACK_KEYS = {"replaces", "source", "adapter"}
+_DRIFT_KEYS = {
+    "window",
+    "min_history",
+    "warn",
+    "fail",
+    "columns",
+    "exclude",
+    "max_categories",
+    "bins",
+}
+_THRESHOLD_KEYS = {"psi", "z"}
 
 
 class SpecError(ValueError):
@@ -156,11 +175,41 @@ def _parse_block(raw: Mapping[str, Any], where: str) -> BlockSpec:
             auto_diagnose=_flag(raw, "auto_diagnose", where),
             redact_columns=tuple(redact),
             tests=tuple(tests),
+            drift=_parse_drift(raw.get("drift"), where),
         )
     except ValueError as exc:
         if isinstance(exc, SpecError):
             raise
         raise SpecError(f"{where}: {exc}") from exc
+
+
+def _parse_drift(raw: Any, where: str) -> DriftPolicy | None:
+    """``drift: true`` (defaults), a mapping of settings, or absent/false (off)."""
+    if raw is None or raw is False:
+        return None
+    if raw is True:
+        return DriftPolicy()
+    if not isinstance(raw, Mapping):
+        raise SpecError(f"{where}: 'drift' must be true or a mapping")
+    _check_keys(raw, _DRIFT_KEYS, f"{where} drift")
+    settings: dict[str, Any] = {}
+    for level in ("warn", "fail"):
+        if level in raw:
+            thresholds = raw[level]
+            if not isinstance(thresholds, Mapping):
+                raise SpecError(f"{where}: 'drift.{level}' must be a mapping with psi and/or z")
+            _check_keys(thresholds, _THRESHOLD_KEYS, f"{where} drift.{level}")
+            settings[level] = DriftThresholds(**thresholds)
+    for key in ("columns", "exclude"):
+        if key in raw:
+            value = raw[key]
+            if not isinstance(value, list) or not all(isinstance(c, str) for c in value):
+                raise SpecError(f"{where}: 'drift.{key}' must be a list of column names")
+            settings[key] = tuple(value)
+    for key in ("window", "min_history", "max_categories", "bins"):
+        if key in raw:
+            settings[key] = raw[key]
+    return DriftPolicy(**settings)
 
 
 def _flag(raw: Mapping[str, Any], key: str, where: str) -> bool:

@@ -20,7 +20,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from guardian.core.models import PipelineSpec
+from guardian.core.models import BlockSpec, PipelineSpec
 from guardian.core.refs import load_ref
 from guardian.demo.refactor import rewrite
 
@@ -40,6 +40,8 @@ class Fault:
     replace: Callable[[Callable[..., pd.DataFrame]], Callable[..., pd.DataFrame]] | None = field(
         default=None, repr=False
     )
+    # Set for faults that adapt to the block they are injected into (see apply_faults).
+    for_block: Callable[[BlockSpec], Fault] | None = field(default=None, repr=False)
 
     def __call__(self, df: pd.DataFrame) -> pd.DataFrame:
         return self.apply(df)
@@ -152,6 +154,55 @@ def code_bug(
     return Fault(f"code_bug({fraction})", lambda df: df, replace)
 
 
+def drift(
+    fraction: float = 0.5,
+    seed: int = 0,
+    *,
+    columns: Sequence[str] | None = None,
+    exclude: Sequence[str] | None = None,
+) -> Fault:
+    """Shift the distribution of a block's output while keeping every row schema-valid.
+
+    In a fraction of rows, each affected column takes a value it already holds in
+    another row: numbers take the column's maximum, everything else its most frequent
+    value. Per-row checks (ranges, allowed values, patterns) still pass because every
+    value is one the block itself produced; the output as a whole is skewed. Datetime
+    and boolean columns are left alone. ``columns`` limits the fault (default: all);
+    ``exclude`` skips columns, and when injected with ``apply_faults`` it defaults to
+    the block's merge key, so row identity (and uniqueness) is untouched.
+    """
+
+    def apply(df: pd.DataFrame, skip: Sequence[str] = tuple(exclude or ())) -> pd.DataFrame:
+        out = df.copy()
+        rows = pick_positions(len(out), fraction, seed)
+        if not len(rows):
+            return out
+        for j, column in enumerate(out.columns):
+            if (columns is not None and column not in columns) or column in skip:
+                continue
+            values = out[column]
+            present = values.dropna()
+            if present.empty or pd.api.types.is_bool_dtype(values):
+                continue
+            if pd.api.types.is_datetime64_any_dtype(values):
+                continue
+            if pd.api.types.is_numeric_dtype(values):
+                target = present.max()
+            else:
+                target = present.astype(str).value_counts().sort_index().idxmax()
+                target = present[present.astype(str) == target].iloc[0]
+            out.iloc[rows, j] = target
+        return out
+
+    name = f"drift({fraction})"
+
+    def bind(block: BlockSpec) -> Fault:
+        skip = tuple(exclude) if exclude is not None else tuple(block.merge_key or ())
+        return Fault(name, lambda df: apply(df, skip))
+
+    return Fault(name, apply, for_block=bind)
+
+
 def inject(fn: Callable[..., pd.DataFrame], *faults: Fault) -> Callable[..., pd.DataFrame]:
     """Wrap ``fn`` so its output goes through ``faults`` in order.
 
@@ -191,7 +242,8 @@ def apply_faults(
         if faults.get(block.name):
             version = (active_versions or {}).get(block.name) or block.active
             key = f"__faulted__:{block.name}:{version or 'fn'}"
-            registry[key] = inject(load_ref(block.version_ref(version)), *faults[block.name])
+            bound = [f.for_block(block) if f.for_block else f for f in faults[block.name]]
+            registry[key] = inject(load_ref(block.version_ref(version)), *bound)
             if block.versions:
                 versions = {**block.versions, version: key}
                 fn = key if version == block.active else block.fn
@@ -208,7 +260,7 @@ def apply_faults(
 FAULT_SYNTAX = (
     "BLOCK:corrupt:FRACTION[:COL,COL]  |  BLOCK:null:COLUMN:FRACTION  |  "
     "BLOCK:drop:COL[,COL]  |  BLOCK:rename:OLD=NEW  |  BLOCK:crash  |  "
-    "BLOCK:code_bug[:FRACTION]"
+    "BLOCK:code_bug[:FRACTION]  |  BLOCK:drift[:FRACTION]"
 )
 
 
@@ -231,6 +283,8 @@ def parse_fault(text: str, seed: int = 0) -> tuple[str, Fault]:
             return block, schema_drift(rename={old: new})
         if kind == "crash" and not args:
             return block, crash(f"injected crash in {block}")
+        if kind == "drift" and len(args) <= 1:
+            return block, drift(float(args[0]) if args else 0.5, seed=seed)
         if kind == "code_bug" and len(args) <= 1:
             return block, code_bug(float(args[0]) if args else 0.5, seed=seed)
     except ValueError as exc:

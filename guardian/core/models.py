@@ -106,6 +106,58 @@ class ShadowPolicy:
 
 
 @dataclass(frozen=True)
+class DriftThresholds:
+    """Drift at or above either threshold reaches this level (None: not checked)."""
+
+    psi: float | None = None
+    z: float | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("psi", "z"):
+            value = getattr(self, name)
+            if value is not None and (isinstance(value, bool) or float(value) <= 0):
+                raise ValueError(f"drift threshold {name} must be a positive number")
+            if value is not None:
+                object.__setattr__(self, name, float(value))
+
+
+@dataclass(frozen=True)
+class DriftPolicy:
+    """Statistical drift detection for a block's promoted output.
+
+    The profile is learned from the block's last ``window`` promoted snapshots (at least
+    ``min_history`` are needed). Categorical columns are scored by PSI, numeric ones by
+    PSI and a z-score of the mean shift. ``columns`` limits the check (default: every
+    numeric column and every categorical one with at most ``max_categories`` values,
+    except the merge key); ``exclude`` removes columns.
+    """
+
+    window: int = 5
+    min_history: int = 2
+    warn: DriftThresholds = field(default_factory=lambda: DriftThresholds(psi=0.1, z=3.0))
+    fail: DriftThresholds = field(default_factory=lambda: DriftThresholds(psi=0.25, z=6.0))
+    columns: tuple[str, ...] | None = None
+    exclude: tuple[str, ...] = ()
+    max_categories: int = 50
+    bins: int = 10
+
+    def __post_init__(self) -> None:
+        for name in ("window", "min_history", "max_categories", "bins"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"drift.{name} must be a positive integer")
+        if self.min_history > self.window:
+            raise ValueError("drift.min_history cannot exceed drift.window")
+        for metric in ("psi", "z"):
+            warn, fail = getattr(self.warn, metric), getattr(self.fail, metric)
+            if warn is not None and fail is not None and warn > fail:
+                raise ValueError(f"drift warn.{metric} must not exceed fail.{metric}")
+        if self.columns is not None:
+            object.__setattr__(self, "columns", tuple(self.columns))
+        object.__setattr__(self, "exclude", tuple(self.exclude))
+
+
+@dataclass(frozen=True)
 class FallbackEdge:
     """When ``replaces`` is unavailable, read ``source`` instead and apply ``adapter``."""
 
@@ -148,6 +200,8 @@ class BlockSpec:
     auto_diagnose: bool = False
     # Columns whose values are masked in anything sent to an LLM.
     redact_columns: tuple[str, ...] = ()
+    # Opt-in statistical drift detection (soft failures that pass schema validation).
+    drift: DriftPolicy | None = None
     # The block's unit tests (pytest node ids or paths, relative to the repository root).
     # A proposed fix must pass them before it can become a pull request.
     tests: tuple[str, ...] = ()

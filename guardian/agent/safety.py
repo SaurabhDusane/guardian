@@ -77,6 +77,7 @@ _FORBIDDEN_STORES = {
     "statuses": frozenset({"set"}),
     "snapshots": frozenset({"write", "mark_last_good"}),
     "quarantine": frozenset({"add", "mark_replayed"}),
+    "drift": frozenset({"write"}),
 }
 
 

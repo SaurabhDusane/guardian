@@ -15,6 +15,9 @@
 # `auto_diagnose: true` to a block to diagnose it automatically after a ROLLBACK
 # (needs GUARDIAN_LLM_PROVIDER and GUARDIAN_LLM_MODEL; it never fails a run).
 #
+# b6_enrich also opts into statistical drift detection (`drift`): output that passes
+# its schema but no longer looks like its last promoted snapshots is a soft failure.
+#
 # Every block declares its unit tests (`tests`): a proposed fix must pass them, plus a
 # shadow run, before the agent may open a pull request (`guardian propose <block>`).
 #
@@ -90,6 +93,7 @@ blocks:
     active: v1
     merge_key: [order_id]
     inputs: [b5_normalize]
+    drift: true  # learn b6's normal output from its last 5 promoted snapshots (PSI, z)
     schema: demo.schemas:EnrichedSchema
     quarantine_threshold: 0.1
 

@@ -6,6 +6,8 @@
 - each failed validation rule with its row count;
 - a capped sample of the quarantined rows;
 - the output schema compared with the last good run's, and with the declared schema;
+- the statistical drift check of the run (PSI / z-score per column), if the block has
+  a drift policy;
 - per-column stats for the run's good rows, its bad rows and the last good snapshot;
 - whether the block's code changed since the last good run (from recorded code
   fingerprints), and the git history of its source file since its last promotion;
@@ -566,6 +568,32 @@ def build_evidence(
     if not has_output:
         schema["note"] = "the block produced no output on this run"
     items.add("schema_diff", "output schema vs last good run and declared schema", schema)
+
+    # Statistical drift, when the block has a drift policy and this run was checked.
+    drift = g.drift.get(block, run_id)
+    if drift is not None:
+        columns = sorted(
+            drift["columns"],
+            key=lambda c: ({"FAIL": 0, "WARN": 1}.get(c["level"], 2), -c["psi"], c["column"]),
+        )
+        for c in columns:
+            if redactor.is_redacted(c["column"]):
+                for key in ("top_ref", "top_now", "mean_ref", "mean_now", "std_ref"):
+                    c[key] = REDACTED if c.get(key) not in (None, []) else c.get(key)
+        items.add(
+            "drift",
+            f"distribution drift vs {len(drift['reference_runs'])} promoted snapshot(s): "
+            f"{drift['level']}",
+            {
+                "level": drift["level"],
+                "reason": drift["reason"],
+                "reference_runs": drift["reference_runs"],
+                "rows": drift["rows"],
+                "thresholds": {"warn": drift["policy"]["warn"], "fail": drift["policy"]["fail"]},
+                "columns": columns,
+                "not_tracked": drift["skipped"],
+            },
+        )
 
     # Per-column stats.
     for column in _frame_columns(last_good, good, bad):
