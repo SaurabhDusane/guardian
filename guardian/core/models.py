@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 DEFAULT_STORAGE_ROOT = Path(".guardian")
@@ -78,9 +80,12 @@ class BlockSpec:
     schema: str | None = None
     quarantine_threshold: float = 0.0
     fallbacks: tuple[FallbackEdge, ...] = ()
+    # Extra keyword arguments passed to ``fn`` (e.g. loader settings for a source block).
+    params: Mapping[str, Any] = field(default_factory=dict, hash=False)
 
     def __post_init__(self) -> None:
         validate_name(self.name, "block name")
+        object.__setattr__(self, "params", MappingProxyType(dict(self.params)))
         # Allow lists from callers/YAML while keeping the dataclass hashable.
         object.__setattr__(self, "inputs", tuple(self.inputs))
         object.__setattr__(self, "fallbacks", tuple(self.fallbacks))

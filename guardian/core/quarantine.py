@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import duckdb
 import pandas as pd
@@ -33,6 +33,29 @@ def rows_to_payloads(df: pd.DataFrame) -> list[str]:
         return []
     records = json.loads(df.to_json(orient="records", date_format="iso", date_unit="us"))
     return [json.dumps(r, sort_keys=True) for r in records]
+
+
+def restore_dtypes(df: pd.DataFrame, dtypes: Mapping[str, Any]) -> pd.DataFrame:
+    """Best-effort inverse of ``rows_to_payloads``: cast columns back to ``dtypes``.
+
+    JSON payloads lose types (datetimes become ISO strings, ints may become floats).
+    Columns that cannot be cast cleanly (e.g. they hold the bad values that got the
+    rows quarantined) are left as they are for validation to judge.
+    """
+    out = df.copy()
+    for column, dtype in dtypes.items():
+        if column not in out.columns or out[column].dtype == dtype:
+            continue
+        try:
+            if isinstance(dtype, pd.DatetimeTZDtype) or pd.api.types.is_datetime64_dtype(dtype):
+                utc = isinstance(dtype, pd.DatetimeTZDtype)
+                converted = pd.to_datetime(out[column], utc=utc, format="ISO8601")
+                out[column] = converted.astype(dtype)
+            else:
+                out[column] = out[column].astype(dtype)
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return out
 
 
 def entries_from_frame(

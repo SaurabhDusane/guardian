@@ -9,6 +9,7 @@ from guardian.core.quarantine import (
     QuarantineEntry,
     QuarantineStore,
     entries_from_frame,
+    restore_dtypes,
     rows_to_payloads,
 )
 
@@ -111,3 +112,24 @@ def test_mark_replayed_never_deletes(store, bad_rows) -> None:
 def test_persists_across_instances(tmp_path, bad_rows) -> None:
     DuckDBQuarantineStore(tmp_path).add(entries_from_frame("b1", "r1", bad_rows, "r", "w"))
     assert DuckDBQuarantineStore(tmp_path).count(block="b1") == 2
+
+
+def test_restore_dtypes_inverts_payload_roundtrip(store) -> None:
+    original = pd.DataFrame(
+        {
+            "n": [1, 2],
+            "x": [1.5, 2.5],
+            "t": pd.to_datetime(["2024-01-01 10:00", "2024-02-01 00:00"], utc=True),
+            "s": ["a", "b"],
+        }
+    )
+    store.add(entries_from_frame("b1", "r1", original, "rule", "why"))
+    _, frame = store.load_frame("b1")
+    restored = restore_dtypes(frame[list(original.columns)], dict(original.dtypes))
+    pd.testing.assert_frame_equal(restored, original, check_dtype=True)
+
+
+def test_restore_dtypes_leaves_uncastable_columns() -> None:
+    frame = pd.DataFrame({"n": ["1", "oops"], "extra": [1, 2]})
+    restored = restore_dtypes(frame, {"n": pd.Series([1]).dtype, "missing": "int64"})
+    assert restored["n"].tolist() == ["1", "oops"]

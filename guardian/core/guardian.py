@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import traceback
@@ -31,6 +32,7 @@ from guardian.core.quarantine import (
     DuckDBQuarantineStore,
     QuarantineEntry,
     QuarantineStore,
+    restore_dtypes,
     rows_to_payloads,
 )
 from guardian.core.refs import load_ref
@@ -84,7 +86,7 @@ class JsonBlockStatusStore:
 
 
 def new_run_id(prefix: str = "run") -> str:
-    return f"{prefix}-{datetime.now(UTC):%Y%m%dT%H%M%S%f}-{uuid.uuid4().hex[:6]}"
+    return f"{prefix}-{datetime.now(UTC):%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:6]}"
 
 
 class Guardian:
@@ -124,7 +126,10 @@ class Guardian:
         return load_ref(ref, self.registry)
 
     def block_fn(self, block: str) -> Callable[..., pd.DataFrame]:
-        return self.resolve(self.spec.block(block).fn)
+        """The block's function with its spec ``params`` bound as keyword arguments."""
+        spec = self.spec.block(block)
+        fn = self.resolve(spec.fn)
+        return functools.partial(fn, **spec.params) if spec.params else fn
 
     def validator_for(self, block: str) -> Validator:
         if block not in self._validators:
@@ -322,6 +327,12 @@ class Guardian:
         if not ids:
             return ReplayResult(block, replayed=0, still_failing=0)
         frame.index = pd.Index(ids, name=None)
+        # Payloads are the block's own output rows; the last-good snapshot of the same
+        # block tells us their original dtypes (JSON loses them).
+        base_ref = self.snapshots.last_good(block)
+        base = self.snapshots.read(base_ref.block, base_ref.run_id) if base_ref else None
+        if base is not None:
+            frame = restore_dtypes(frame, dict(base.dtypes))
 
         try:
             out = self.block_fn(block)(frame)
@@ -354,9 +365,11 @@ class Guardian:
             return self._replay_done(block, run_id, [], len(ids), None)
 
         replayed_rows = result.good[result.good.index.isin(passing)]
-        base_ref = self.snapshots.last_good(block)
-        frames = [self.snapshots.read(base_ref.block, base_ref.run_id)] if base_ref else []
-        merged = pd.concat([*frames, replayed_rows], ignore_index=True)
+        if base is not None:
+            replayed_rows = restore_dtypes(replayed_rows, dict(base.dtypes))
+        merged = pd.concat(
+            [*([base] if base is not None else []), replayed_rows], ignore_index=True
+        )
         ref = self.snapshots.write(block, run_id, merged)
         self.snapshots.mark_last_good(block, run_id)
         changed = self.quarantine.mark_replayed(passing, replay_run_id=run_id)
