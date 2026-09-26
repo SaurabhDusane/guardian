@@ -115,3 +115,43 @@ blocks:
 - Never weaken a test to make it pass; fix the code or flag the ambiguity.
 - Keep adapters thin. If you find repair logic creeping into an adapter, move it to core.
 - Commit at the end of every phase with a descriptive message.
+
+## Block-agnostic rules (apply to all code, v1 and v2)
+- No block name may appear in guardian/core, guardian/runner, or guardian/adapters. All
+  behavior is driven by the pipeline spec. Block names appear only in demo/ and tests.
+- Every CLI command that acts on a block takes the block name as an argument and works for
+  any block in the spec, with a clear error for unknown names.
+- Tests select blocks by DAG role using a shared helper, `blocks_by_role(spec)`, which returns:
+  - source: no inputs;
+  - leaf: no dependents;
+  - fallback_protected: at least one dependent has a fallback edge replacing it;
+  - unprotected: has dependents, none with a fallback edge replacing it;
+  - fallback_source: is the `source` of some fallback edge;
+  - multi_dependent: two or more dependents.
+  Behavior tests are parametrized over every role present in the demo spec.
+- The demo spec must contain at least one block for each role above.
+
+## Resolution when several blocks are unhealthy at once
+- A fallback edge is used only if its fallback source is HEALTHY. If the fallback source is
+  also DEGRADED/OUT, the consumer reads the replaced upstream's last-good snapshot (STALE)
+  without applying the adapter. If neither has a last-good snapshot: NoSafeInputError.
+- A source block has no inputs to resolve; when it is DEGRADED/OUT, its dependents follow
+  the normal rules (fallback edge if one exists and is healthy, else stale).
+
+## v2 invariants (apply to every phase from 7 on)
+- Consumers NEVER read candidate (shadow) snapshots. Only promoted snapshots are visible
+  to resolve_input.
+- A candidate always reads the LIVE (promoted) inputs, even if an upstream block also has a
+  candidate in shadow. Several blocks may be in shadow at the same time, independently.
+- Promotion is reversible: `guardian shadow rollback <block>` restores the previous active
+  version. Snapshots stay immutable, so no data is rewritten.
+- Every snapshot records provenance: which source each input came from and its quality
+  (FRESH / STALE / FALLBACK). Quality propagates downstream as the worst of a block's inputs.
+- The diagnosis agent is advisory. It never edits code on the default branch, never merges,
+  and never promotes. Every change it proposes goes through a PR plus a passing shadow run.
+- Every agent claim must cite items from its evidence bundle by ID. Claims citing
+  nonexistent evidence are rejected and the diagnosis is downgraded to `unknown`.
+- Data sent to an LLM is minimized: capped samples, and columns listed in `redact_columns`
+  are masked before leaving the machine.
+- The LLM provider, model name, and API key come from config/env vars. Never hardcode them.
+- All LLM-dependent tests use a fake client with recorded responses; no network in pytest.
