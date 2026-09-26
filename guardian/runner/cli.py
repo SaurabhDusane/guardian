@@ -8,7 +8,9 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
+from rich.tree import Tree
 
 import guardian as guardian_pkg
 from guardian.core.guardian import Guardian
@@ -19,6 +21,9 @@ from guardian.core.models import (
     GuardianError,
     QuarantineStatus,
 )
+from guardian.core.provenance import LineageNode
+from guardian.core.provenance import impact as compute_impact
+from guardian.core.provenance import lineage as compute_lineage
 from guardian.core.shadow import ShadowMode
 from guardian.runner.executor import Executor, Outcome, RunReport
 from guardian.runner.spec_loader import SpecError, load_spec
@@ -436,6 +441,89 @@ def render_shadow_runs(g: Guardian, block: str) -> Table:
             "[green]yes[/]" if r.within_tolerance else "[red]no[/]",
         )
     return table
+
+
+# ---------------------------------------------------------------- provenance
+
+_QUALITY_STYLE = {"FRESH": "green", "STALE": "yellow", "FALLBACK": "magenta"}
+
+
+def _quality(value: str) -> str:
+    return f"[{_QUALITY_STYLE.get(value, 'red')}]{value}[/]"
+
+
+@app.command("impact")
+def impact_cmd(
+    block: str = typer.Argument(..., help="Any block in the spec."),
+    since: str | None = typer.Option(None, "--since", help="Only runs from this run id on."),
+    spec: Path | None = SpecOption,
+    root: Path = RootOption,
+) -> None:
+    """List every snapshot touched by a degraded state of BLOCK (its blast radius)."""
+    with _guarded(root, spec) as g:
+        g.spec.block(block)
+        entries = compute_impact(g.provenance, block, since)
+        table = Table(title=f"Impact of {block}" + (f" since {since}" if since else ""))
+        for column in ("snapshot", "run", "relation", "quality / outcome", "how"):
+            table.add_column(column)
+        for e in entries:
+            table.add_row(
+                e.block,
+                e.run_id,
+                e.relation,
+                _quality(e.quality) if e.relation == "downstream" else f"[red]{e.quality}[/]",
+                escape(e.reason),
+            )
+        console.print(table)
+        downstream = [e for e in entries if e.relation == "downstream"]
+        runs = sorted({e.run_id for e in entries if e.relation == "self"})
+        console.print(
+            f"{block}: {len(runs)} degraded run(s); {len(downstream)} downstream snapshot(s) "
+            f"in {len({e.block for e in downstream})} block(s) touched."
+        )
+
+
+@app.command("lineage")
+def lineage_cmd(
+    block: str = typer.Argument(..., help="Any block in the spec."),
+    run_id: str = typer.Argument(..., help="The run whose snapshot to trace."),
+    spec: Path | None = SpecOption,
+    root: Path = RootOption,
+) -> None:
+    """Print the upstream provenance tree of BLOCK's snapshot from RUN_ID."""
+    with _guarded(root, spec) as g:
+        g.spec.block(block)
+        console.print(render_lineage(compute_lineage(g.provenance, block, run_id)))
+
+
+def _lineage_label(node: LineageNode) -> str:
+    p = node.provenance
+    via = node.via
+    prefix = ""
+    if via is not None and via.read.value == "FALLBACK":
+        prefix = f"as {via.upstream}, via adapter {via.adapter}: "
+    elif via is not None and via.read.value == "STALE":
+        prefix = f"stale {via.upstream} ({via.upstream_status}): "
+    if p is None:
+        return f"{prefix}[bold]{node.snapshot_id}[/]  [dim](no provenance recorded)[/]"
+    detail = p.kind + (f", version {p.version}" if p.version else "")
+    if p.kind == "replay":
+        detail += f", recovered rows from {', '.join(p.replayed_from) or '-'}"
+    return f"{prefix}[bold]{node.snapshot_id}[/]  {_quality(p.quality.value)}  [dim]({detail})[/]"
+
+
+def render_lineage(root: LineageNode) -> Tree:
+    tree = Tree(_lineage_label(root))
+
+    def add(branch: Tree, node: LineageNode) -> None:
+        for parent in node.parents:
+            label = _lineage_label(parent)
+            if parent.via is None:  # a replay's base snapshot
+                label = f"base: {label}"
+            add(branch.add(label), parent)
+
+    add(tree, root)
+    return tree
 
 
 def main() -> None:

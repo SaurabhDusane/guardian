@@ -210,3 +210,11 @@ def test_load_only_on_source_blocks() -> None:
                 {"name": "b", "fn": "m:f", "inputs": ["a"], "load": "m:l"},
             )
         )
+
+
+def test_annotate_quality_flag() -> None:
+    s = parse_spec(spec({"name": "a", "fn": "m:f", "annotate_quality": True}))
+    assert s.block("a").annotate_quality is True
+    assert parse_spec(spec({"name": "a", "fn": "m:f"})).block("a").annotate_quality is False
+    with pytest.raises(SpecError, match="true or false"):
+        parse_spec(spec({"name": "a", "fn": "m:f", "annotate_quality": "yes"}))

@@ -87,6 +87,7 @@ blocks:
     inputs: [b5_normalize]
     schema: demo.schemas:CustomerSchema
     quarantine_threshold: 0.1
+    annotate_quality: true  # opt-in: adds _guardian_quality (FRESH/STALE/FALLBACK)
 
   - name: b8_aggregate
     fn: demo.blocks:aggregate

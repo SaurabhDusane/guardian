@@ -16,6 +16,7 @@ import dagster as dg
 
 from guardian.core.guardian import Guardian
 from guardian.core.models import BlockSkipped, NoSafeInputError
+from guardian.core.provenance import Provenance
 from guardian.core.shadow import ShadowRun
 
 RUN_ID_TAG = "guardian/run_id"
@@ -29,6 +30,18 @@ def guardian_run_id(run: dg.DagsterRun) -> str:
 
 def block_name(asset_key: dg.AssetKey) -> str:
     return asset_key.to_user_string()
+
+
+def provenance_metadata(record: Provenance) -> dict[str, Any]:
+    """A snapshot's quality and provenance summary as Dagster metadata."""
+    return {
+        "guardian_quality": record.quality.value,
+        "guardian_inputs": "; ".join(
+            f"{i.upstream}: {i.how} ({i.quality.value})" for i in record.inputs
+        )
+        or "-",
+        "guardian_provenance": dg.MetadataValue.json(record.as_dict()),
+    }
 
 
 def shadow_metadata(run: ShadowRun) -> dict[str, Any]:
@@ -71,6 +84,9 @@ class GuardianIOManager(dg.IOManager):
                     "rows_bad": decision.bad_rows,
                 }
             )
+        record = self.guardian.provenance.get(block, run_id)
+        if record is not None:
+            metadata.update(provenance_metadata(record))
         if shadow is not None:
             metadata.update(shadow_metadata(shadow))
         context.add_output_metadata(metadata)

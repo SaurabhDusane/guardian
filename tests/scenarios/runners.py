@@ -27,6 +27,15 @@ from guardian.core.models import (
     QuarantineStatus,
     ReplayResult,
 )
+from guardian.core.provenance import (
+    CANDIDATE,
+    BlockRun,
+    ImpactEntry,
+    LineageNode,
+    Provenance,
+    impact,
+    lineage,
+)
 from guardian.core.refs import load_ref
 from guardian.core.shadow import Shadow, ShadowRun
 from guardian.core.versions import Promotion
@@ -206,10 +215,29 @@ class ScenarioRunner(abc.ABC):
         return self._read(read)
 
     def candidate_provenance(self, block: str, version: str, run_id: str) -> dict | None:
-        return self._read(lambda g: g.candidate_store(version).read_provenance(block, run_id))
+        def read(g: Guardian) -> dict | None:
+            record = g.provenance.get(block, run_id, store=CANDIDATE)
+            assert record is None or record.version == version
+            return None if record is None else record.as_dict()
+
+        return self._read(read)
 
     def provenance(self, block: str, run_id: str) -> dict | None:
-        return self._read(lambda g: g.snapshots.read_provenance(block, run_id))
+        """The live snapshot's provenance record (as a dict), or None."""
+        record = self._read(lambda g: g.provenance.get(block, run_id))
+        return None if record is None else record.as_dict()
+
+    def provenance_records(self) -> list[Provenance]:
+        return self._read(lambda g: g.provenance.records())
+
+    def block_runs(self) -> list[BlockRun]:
+        return self._read(lambda g: g.provenance.runs())
+
+    def impact(self, block: str, since: str | None = None) -> list[ImpactEntry]:
+        return self._read(lambda g: impact(g.provenance, block, since))
+
+    def lineage(self, block: str, run_id: str) -> LineageNode:
+        return self._read(lambda g: lineage(g.provenance, block, run_id))
 
 
 def _power_cut(*args: Any, **kwargs: Any) -> Any:

@@ -88,3 +88,38 @@ def test_candidate_runs_inside_the_same_materialization(tmp_path) -> None:
         # one SHADOW run event, in this Dagster run, for the shadowed block only
         runs = [e for e in g.events.query(kind=EventKind.SHADOW) if e.data["action"] == "run"]
         assert [(e.block, e.run_id) for e in runs] == [(x, "d1")]
+
+
+def test_quality_and_provenance_as_materialization_metadata(tmp_path) -> None:
+    from guardian.adapters.dagster import build_definitions
+    from guardian.adapters.dagster.io_manager import RUN_ID_TAG
+    from guardian.core.guardian import Guardian
+    from guardian.demo.faults import apply_faults, crash
+
+    from ..helpers.roles import dependents, representative
+    from ..scenarios.runners import scenario_spec
+
+    spec = scenario_spec()
+    x = representative(spec, "fallback_protected")
+    d = next(d for d in dependents(spec, x) if spec.block(d).fallback_for(x))
+    for run_id, faults in (("d0", {}), ("d1", {x: [crash()]})):
+        faulted, registry = apply_faults(spec, faults)
+        with Guardian(faulted, tmp_path, registry=registry) as g:
+            result = (
+                build_definitions(g)
+                .resolve_job_def("guardian_pipeline")
+                .execute_in_process(tags={RUN_ID_TAG: run_id})
+            )
+            assert result.success
+            metadata = {
+                m.asset_key.to_user_string(): {
+                    k: v.value for k, v in m.materialization.metadata.items()
+                }
+                for m in result.get_asset_materialization_events()
+            }
+    meta = metadata[d]
+    assert meta["guardian_quality"] == "FALLBACK"
+    assert "via" in meta["guardian_inputs"] and "(FALLBACK)" in meta["guardian_inputs"]
+    prov = meta["guardian_provenance"]
+    assert prov["quality"] == "FALLBACK" and prov["inputs"][0]["read"] == "FALLBACK"
+    assert "guardian_quality" not in metadata[x]  # crashed: no output, no provenance

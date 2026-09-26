@@ -26,6 +26,7 @@ import duckdb
 import pandas as pd
 
 from guardian.core.models import GuardianError, ShadowPolicy, validate_name
+from guardian.core.provenance import QUALITY_COL
 
 
 class ShadowError(GuardianError):
@@ -93,6 +94,9 @@ class ShadowRun:
 
 def compare_rows(active: pd.DataFrame, candidate: pd.DataFrame, key: list[str]) -> Comparison:
     """Row-level diff of two outputs keyed by ``key`` (which must be unique in both)."""
+    # Guardian's own annotation is not block output: never a difference.
+    active = active.drop(columns=[QUALITY_COL], errors="ignore")
+    candidate = candidate.drop(columns=[QUALITY_COL], errors="ignore")
     missing = [c for c in key if c not in active.columns or c not in candidate.columns]
     if missing:
         raise ShadowError(f"merge_key column(s) {missing} missing from an output")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import json
 import os
@@ -33,6 +34,16 @@ from guardian.core.models import (
     validate_name,
 )
 from guardian.core.planner import plan_input
+from guardian.core.provenance import (
+    CANDIDATE,
+    LIVE,
+    QUALITY_COL,
+    BlockRun,
+    DuckDBProvenanceStore,
+    InputProvenance,
+    Provenance,
+    ProvenanceStore,
+)
 from guardian.core.quarantine import (
     DuckDBQuarantineStore,
     QuarantineEntry,
@@ -133,6 +144,7 @@ class Guardian:
         statuses: BlockStatusStore | None = None,
         registry: Mapping[str, Any] | None = None,
         sample_rate: float = 1.0,
+        provenance: ProvenanceStore | None = None,
     ) -> None:
         self.spec = spec
         self.root = Path(root)
@@ -142,12 +154,15 @@ class Guardian:
         self.statuses = statuses or JsonBlockStatusStore(self.root)
         self.registry = dict(registry or {})
         self.versions = VersionRegistry(self.root)
+        self.provenance = provenance or DuckDBProvenanceStore(self.root)
+        self._quality_cache: dict[tuple[str, str], Quality] = {}
         self.shadows = ShadowStore(self.root)
         self._validators: dict[str, Validator] = {}
         self._candidate_stores: dict[str, LocalParquetSnapshotStore] = {}
         self.decisions: dict[tuple[str, str], Decision] = {}
-        # Inputs each block resolved per run: provenance for the snapshots it writes.
-        self._resolved: dict[tuple[str, str], dict[str, DataRef]] = {}
+        # Inputs each block resolved per run (with the upstream's status at that time):
+        # provenance for the snapshots it writes.
+        self._resolved: dict[tuple[str, str], dict[str, tuple[DataRef, str]]] = {}
         # Per-instance caches of the version registry and shadow store (both change
         # only through this instance's own shadow/promotion calls during a run).
         self._active_cache: dict[str, str | None] = {}
@@ -357,6 +372,9 @@ class Guardian:
         staged = self._staged.pop((block, run_id), None)
         inputs = staged if inputs is None else inputs
         decision = self.handle_result(block, run_id, result)
+        if isinstance(result, BlockSkipped):
+            outcome = "BLOCKED" if result.blocked else "SKIPPED"
+            self._record_run(block, run_id, outcome, result.reason)
         shadow = None if inputs is None else self.run_shadow(block, run_id, inputs, decision)
         self.shadow_results[(block, run_id)] = shadow
         return decision, shadow
@@ -382,7 +400,9 @@ class Guardian:
             error=f"{type(error).__name__}: {error}",
             traceback="".join(traceback.format_exception(error))[-4000:],
         )
-        return self._rollback(block, run_id, CRASH_REASON, total=0, good=0, bad=0)
+        decision = self._rollback(block, run_id, CRASH_REASON, total=0, good=0, bad=0)
+        self._record_run(block, run_id, "ROLLBACK", CRASH_REASON)
+        return decision
 
     def on_output(self, block: str, run_id: str, df: pd.DataFrame) -> Decision:
         spec = self.spec.block(block)
@@ -396,8 +416,6 @@ class Guardian:
         n_bad = len(result.bad)
         n_good = total - n_bad
         provenance = self._run_provenance(block, run_id)
-        if self.snapshots.read_provenance(block, run_id) is None:
-            self.snapshots.write_provenance(block, run_id, provenance)
         self.events.emit(
             EventKind.VALIDATION,
             block=block,
@@ -406,25 +424,33 @@ class Guardian:
             good=n_good,
             bad=n_bad,
             schema_error=result.schema_error,
-            version=provenance["version"],
-            quality=provenance["quality"],
+            version=provenance.version,
+            quality=provenance.quality.value,
         )
 
         if result.schema_error is not None:
             self._quarantine(block, run_id, result.bad, df)
-            return self._rollback(
+            self._record_output(provenance, has_snapshot=False)
+            decision = self._rollback(
                 block, run_id, result.schema_error, total=total, good=0, bad=total
             )
+            self._record_run(block, run_id, "ROLLBACK", result.schema_error)
+            return decision
 
         fraction = n_bad / total if total else 0.0
         if fraction <= spec.quarantine_threshold:
-            ref = self.snapshots.write(block, run_id, result.good)
+            good = result.good
+            if spec.annotate_quality:  # opt-in: user frames are never changed by default
+                good = good.assign(**{QUALITY_COL: provenance.quality.value})
+            ref = self.snapshots.write(block, run_id, good)
+            self._record_output(provenance, has_snapshot=True)
             self._quarantine(block, run_id, result.bad, df)
             self.snapshots.mark_last_good(block, run_id)
             self.events.emit(
                 EventKind.SNAPSHOT, block=block, run_id=run_id, rows=n_good, last_good=True
             )
             self._mark_after_run(block, BlockStatus.HEALTHY, run_id)
+            self._record_run(block, run_id, "PASS")
             return Decision(block, run_id, Action.PASS, None, total, n_good, n_bad, snapshot=ref)
 
         # Too many bad rows: nothing is promoted, so the good rows are quarantined too
@@ -432,7 +458,10 @@ class Guardian:
         reason = f"bad-row fraction {fraction:.4f} exceeds threshold {spec.quarantine_threshold}"
         good_rows = _with_rule(df.iloc[~_bad_mask(df, result)], ROLLBACK_RULE, reason)
         self._quarantine(block, run_id, pd.concat([result.bad, good_rows]), df)
-        return self._rollback(block, run_id, reason, total=total, good=n_good, bad=n_bad)
+        self._record_output(provenance, has_snapshot=False)
+        decision = self._rollback(block, run_id, reason, total=total, good=n_good, bad=n_bad)
+        self._record_run(block, run_id, "ROLLBACK", reason)
+        return decision
 
     def _rollback(
         self, block: str, run_id: str, reason: str, *, total: int, good: int, bad: int
@@ -474,14 +503,15 @@ class Guardian:
                 EventKind.ERROR, block=block, run_id=run_id, upstream=upstream, error=str(exc)
             )
             raise
+        upstream_status = self.status(upstream).value
         if run_id is not None:
-            self._resolved.setdefault((block, run_id), {})[upstream] = ref
+            self._resolved.setdefault((block, run_id), {})[upstream] = (ref, upstream_status)
         self.events.emit(
             EventKind.REROUTE if ref.rerouted else EventKind.RESOLVE,
             block=block,
             run_id=run_id,
             upstream=upstream,
-            upstream_status=self.status(upstream).value,
+            upstream_status=upstream_status,
             source=ref.block,
             source_run_id=ref.run_id,
             adapter=ref.adapter,
@@ -494,46 +524,74 @@ class Guardian:
 
     def snapshot_quality(self, block: str, run_id: str) -> Quality:
         """A live snapshot's recorded quality (FRESH if none was recorded)."""
-        provenance = self.snapshots.read_provenance(block, run_id)
-        return Quality(provenance["quality"]) if provenance else Quality.FRESH
+        key = (block, run_id)
+        if key not in self._quality_cache:
+            record = self.provenance.get(block, run_id)
+            self._quality_cache[key] = record.quality if record else Quality.FRESH
+        return self._quality_cache[key]
 
     def _input_quality(self, ref: DataRef) -> Quality:
         """How good one input is: the read itself, and the snapshot it read."""
         return Quality.worst([ref.read_quality, self.snapshot_quality(ref.block, ref.run_id)])
 
-    def input_provenance(self, block: str, run_id: str) -> list[dict[str, Any]]:
+    def input_provenance(self, block: str, run_id: str) -> tuple[InputProvenance, ...]:
         """The live snapshots ``block`` read on ``run_id``, in input order."""
         resolved = self._resolved.get((block, run_id), {})
         inputs = []
         for upstream in self.spec.block(block).inputs:
-            ref = resolved.get(upstream)
-            if ref is None:
+            if upstream not in resolved:
                 continue
+            ref, upstream_status = resolved[upstream]
             inputs.append(
-                {
-                    "upstream": upstream,
-                    "store": "live",
-                    "block": ref.block,
-                    "run_id": ref.run_id,
-                    "adapter": ref.adapter,
-                    "read": ref.read_quality.value,
-                    "quality": self._input_quality(ref).value,
-                }
+                InputProvenance(
+                    upstream=upstream,
+                    source_block=ref.block,
+                    source_run_id=ref.run_id,
+                    adapter=ref.adapter,
+                    read=ref.read_quality,
+                    quality=self._input_quality(ref),
+                    upstream_status=upstream_status,
+                )
             )
-        return inputs
+        return tuple(inputs)
 
     def _run_provenance(
-        self, block: str, run_id: str, *, version: str | None = None, kind: str = "run"
-    ) -> dict[str, Any]:
+        self,
+        block: str,
+        run_id: str,
+        *,
+        version: str | None = None,
+        kind: str = "run",
+        store: str = LIVE,
+    ) -> Provenance:
         inputs = self.input_provenance(block, run_id)
-        return {
-            "kind": kind,
-            "block": block,
-            "run_id": run_id,
-            "version": version if version is not None else self.active_version(block),
-            "inputs": inputs,
-            "quality": Quality.worst(i["quality"] for i in inputs).value,
-        }
+        return Provenance(
+            block=block,
+            run_id=run_id,
+            kind=kind,
+            store=store,
+            version=version if version is not None else self.active_version(block),
+            quality=Quality.worst(i.quality for i in inputs),
+            inputs=inputs,
+        )
+
+    def _record_output(self, provenance: Provenance, *, has_snapshot: bool) -> None:
+        provenance = dataclasses.replace(provenance, has_snapshot=has_snapshot)
+        self.provenance.record(provenance)
+        if provenance.store == LIVE and has_snapshot:
+            self._quality_cache[(provenance.block, provenance.run_id)] = provenance.quality
+
+    def _record_run(self, block: str, run_id: str, outcome: str, reason: str | None = None):
+        self.provenance.record_run(
+            BlockRun(
+                block,
+                run_id,
+                outcome,
+                self.status(block).value,
+                self.active_version(block),
+                reason,
+            )
+        )
 
     def read(self, ref: DataRef) -> pd.DataFrame:
         """Load the snapshot behind ``ref`` and apply its adapter transform, if any."""
@@ -609,6 +667,9 @@ class Guardian:
         recovered = result.good[result.good.index.isin(passing)].sort_index()
         if base is not None:
             recovered = restore_dtypes(recovered, dict(base.dtypes))
+        replay_provenance = self._replay_provenance(block, run_id, version, base_ref, ids, passing)
+        if spec.annotate_quality:
+            recovered = recovered.assign(**{QUALITY_COL: replay_provenance.quality.value})
 
         key = list(spec.merge_key or ())
         missing = [
@@ -649,11 +710,7 @@ class Guardian:
                 last_good_run_id=base_ref.run_id if base_ref else None,
             )
 
-        self.snapshots.write_provenance(
-            block,
-            run_id,
-            self._replay_provenance(block, run_id, version, base_ref, ids, passing),
-        )
+        self._record_output(replay_provenance, has_snapshot=True)
         if on_snapshot is not None:
             on_snapshot(ref)
         changed = self.quarantine.mark_replayed(passing, replay_run_id=run_id)
@@ -671,7 +728,7 @@ class Guardian:
         base_ref: DataRef | None,
         ids: list[int],
         passing: list[Any],
-    ) -> dict[str, Any]:
+    ) -> Provenance:
         """A replay's quality is the worst of its base snapshot and the runs its
         recovered records came from."""
         passing_ids = set(passing)
@@ -682,19 +739,23 @@ class Guardian:
                 if r.id in passing_ids and r.id in set(ids)
             }
         )
-        qualities = [self.snapshot_quality(block, r) for r in source_runs]
+        qualities = [self._output_quality(block, r) for r in source_runs]
         if base_ref is not None:
             qualities.append(self.snapshot_quality(base_ref.block, base_ref.run_id))
-        return {
-            "kind": "replay",
-            "block": block,
-            "run_id": run_id,
-            "version": version if version is not None else self.active_version(block),
-            "base": base_ref.run_id if base_ref else None,
-            "replayed_from_runs": source_runs,
-            "inputs": [],
-            "quality": Quality.worst(qualities).value,
-        }
+        return Provenance(
+            block=block,
+            run_id=run_id,
+            kind="replay",
+            version=version if version is not None else self.active_version(block),
+            quality=Quality.worst(qualities),
+            base_run_id=base_ref.run_id if base_ref else None,
+            replayed_from=tuple(source_runs),
+        )
+
+    def _output_quality(self, block: str, run_id: str) -> Quality:
+        """Quality of an output, promoted or not (e.g. a rolled-back run being replayed)."""
+        record = self.provenance.get(block, run_id)
+        return record.quality if record else Quality.FRESH
 
     def _replay_failed(self, block: str, run_id: str, n: int, error: str) -> ReplayResult:
         self.events.emit(EventKind.ERROR, block=block, run_id=run_id, phase="replay", error=error)
@@ -821,10 +882,10 @@ class Guardian:
         store = self.candidate_store(shadow.version)
         if not store.exists(block, run_id):
             store.write(block, run_id, good.reset_index(drop=True))
-            store.write_provenance(
-                block,
-                run_id,
-                self._run_provenance(block, run_id, version=shadow.version, kind="candidate"),
+            self.provenance.record(
+                self._run_provenance(
+                    block, run_id, version=shadow.version, kind="candidate", store=CANDIDATE
+                )
             )
 
         comparison = None

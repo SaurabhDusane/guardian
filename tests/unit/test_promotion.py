@@ -232,7 +232,7 @@ def test_rollback_without_promotion_is_refused(g) -> None:
 
 def test_provenance_records_inputs_version_and_quality(g) -> None:
     run(g, "r1")
-    prov = g.snapshots.read_provenance("c", "r1")
+    prov = g.provenance.get("c", "r1").as_dict()
     assert prov["quality"] == "FRESH" and prov["version"] is None
     (inp,) = prov["inputs"]
     assert (inp["block"], inp["run_id"], inp["store"], inp["quality"]) == (
@@ -241,7 +241,7 @@ def test_provenance_records_inputs_version_and_quality(g) -> None:
         "live",
         "FRESH",
     )
-    assert g.snapshots.read_provenance("b", "r1")["version"] == "v1"
+    assert g.provenance.get("b", "r1").as_dict()["version"] == "v1"
 
 
 def test_quality_propagates_as_the_worst_input(tmp_path) -> None:
@@ -264,17 +264,17 @@ def test_quality_propagates_as_the_worst_input(tmp_path) -> None:
         report = run(g, "r1")
         assert report.get("b").outcome is Outcome.ROLLBACK
         # c reads src through the fallback edge (src is healthy): FALLBACK, inherited by d
-        assert g.snapshots.read_provenance("c", "r1")["quality"] == Quality.FALLBACK.value
-        d_input = g.snapshots.read_provenance("d", "r1")["inputs"][0]
+        assert g.provenance.get("c", "r1").as_dict()["quality"] == Quality.FALLBACK.value
+        d_input = g.provenance.get("d", "r1").as_dict()["inputs"][0]
         assert (d_input["read"], d_input["quality"]) == ("FRESH", "FALLBACK")
-        assert g.snapshots.read_provenance("d", "r1")["quality"] == Quality.FALLBACK.value
+        assert g.provenance.get("d", "r1").as_dict()["quality"] == Quality.FALLBACK.value
 
         g.set_block_status("src", BlockStatus.OUT)  # the fallback source is unhealthy too
         run(g, "r2")
-        c_input = g.snapshots.read_provenance("c", "r2")["inputs"][0]
+        c_input = g.provenance.get("c", "r2").as_dict()["inputs"][0]
         assert (c_input["block"], c_input["run_id"], c_input["read"]) == ("b", "r0", "STALE")
-        assert g.snapshots.read_provenance("c", "r2")["quality"] == Quality.STALE.value
-        assert g.snapshots.read_provenance("d", "r2")["quality"] == Quality.STALE.value
+        assert g.provenance.get("c", "r2").as_dict()["quality"] == Quality.STALE.value
+        assert g.provenance.get("d", "r2").as_dict()["quality"] == Quality.STALE.value
 
 
 def test_worst_quality_order() -> None:
@@ -295,4 +295,4 @@ def test_long_lived_guardian_sees_promotions_made_elsewhere(tmp_path) -> None:
         cli.promote("b", approve=True)
         report = run(long_lived, "r2")
         assert report.get("b").version == "v2"
-        assert long_lived.snapshots.read_provenance("b", "r2")["version"] == "v2"
+        assert long_lived.provenance.get("b", "r2").as_dict()["version"] == "v2"

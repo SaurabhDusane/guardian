@@ -37,6 +37,7 @@ flowchart LR
         events[("events.jsonl + events.duckdb<br/>sampled structured events")]
         status[("block_status.json<br/>HEALTHY / DEGRADED / OUT")]
         versions[("versions.duckdb + shadow.duckdb<br/>active versions, promotions,<br/>shadow comparisons")]
+        prov[("provenance.duckdb<br/>inputs, versions, quality<br/>per snapshot; block runs")]
         cands[("candidates/<br/>shadow outputs (never read<br/>by consumers)")]
     end
 
@@ -49,12 +50,13 @@ flowchart LR
     facade --> events
     facade --> status
     facade --> versions
+    facade --> prov
     facade --> cands
 ```
 
 | Layer | Modules | Responsibility |
 |---|---|---|
-| Core | `guardian/core/` | Models, validation, snapshot and quarantine stores, event log, reroute planner, version registry (`versions.py`), shadow comparison and policy (`shadow.py`), `Guardian` facade. All repair and promotion semantics live here. |
+| Core | `guardian/core/` | Models, validation, snapshot and quarantine stores, event log, reroute planner, version registry (`versions.py`), shadow comparison and policy (`shadow.py`), provenance, impact and lineage (`provenance.py`), `Guardian` facade. All repair and promotion semantics live here. |
 | Standalone adapter | `guardian/runner/` | YAML → `PipelineSpec` (DAG checks), topological executor, `guardian` CLI. |
 | Dagster adapter | `guardian/adapters/dagster/` | IO manager (`handle_output` → core, `load_input` → `resolve_input`), `guardian_validation` and `guardian_shadow` asset checks, `guardian_replay` job, `Definitions` built from the same YAML. |
 | Demo | `guardian/demo/` | Messy synthetic orders behind a `DatasetLoader` interface, blocks b1–b8 (every DAG role is represented), schemas, fault injection. |
@@ -75,6 +77,8 @@ uv run guardian set-status b6_enrich HEALTHY
 uv run guardian replay b2_parse                # re-run a (fixed) block on its quarantine
 uv run guardian shadow start b6_enrich v2      # shadow a new version of any block
 uv run guardian shadow status                  # ...then promote / rollback / stop
+uv run guardian impact b5_normalize            # what did a degraded block touch?
+uv run guardian lineage b8_aggregate <run_id>  # where did a snapshot come from?
 uv run pytest                                  # unit tests + scenario suite
 ```
 
@@ -542,6 +546,121 @@ comparison. The comparison appears in two places:
 Promotion, rollback and approval are human actions that go through the core or the CLI,
 and a promotion completed from the CLI takes effect on the next Dagster run.
 
+## Blast radius
+
+When a block goes bad, the next question is *what did it touch?* Guardian records
+provenance for every snapshot it writes, in `.guardian/provenance.duckdb`:
+
+- the block version that produced it;
+- for each input, the snapshot actually read (`block@run_id`). That is the upstream's
+  own snapshot, a fallback source's snapshot and adapter, or a stale last-good one;
+- a quality flag of `FRESH`, `STALE` or `FALLBACK`.
+
+A snapshot's quality is the worst of its inputs (FALLBACK > STALE > FRESH), and each
+input's quality includes the quality of the snapshot it read, so degradation propagates
+downstream. Every block's outcome per run (PASS, ROLLBACK, SKIPPED, BLOCKED) is recorded
+too.
+
+Two commands answer the question for **any block**:
+
+- `guardian impact <block> [--since <run_id>]` lists the block's own degraded runs,
+  then every downstream snapshot that read it while it was unhealthy, and transitively
+  everything that read those snapshots.
+- `guardian lineage <block> <run_id>` prints the upstream provenance tree of one
+  snapshot.
+
+Quality is not written into your data by default. A block can opt in with
+`annotate_quality: true`, which appends a `_guardian_quality` column to its promoted
+output; the demo does this for `b7_customers`. In Dagster, the same information is
+attached to each materialization as `guardian_quality`, `guardian_inputs` (a one-line
+summary) and `guardian_provenance` (the full record, as JSON).
+
+### Example
+
+Four demo runs: r1 is clean, r2 crashes `b6_enrich`, r3 crashes `b5_normalize`, and r4
+is clean again. When b6 is down, b8 falls back to b5 through the adapter, so the damage
+is contained:
+
+```
+$ guardian impact b6_enrich
+┏━━━━━━━━━━━━━━┳━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ snapshot     ┃ run ┃ relation   ┃ quality / outcome ┃ how                                                            ┃
+┡━━━━━━━━━━━━━━╇━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ b6_enrich    │ r2  │ self       │ ROLLBACK          │ crash                                                          │
+│ b8_aggregate │ r2  │ downstream │ FALLBACK          │ read b6_enrich: fallback to b5_normalize@r2 via                │
+│              │     │            │                   │ demo.blocks:b5_to_b6_shape                                     │
+└──────────────┴─────┴────────────┴───────────────────┴────────────────────────────────────────────────────────────────┘
+b6_enrich: 1 degraded run(s); 1 downstream snapshot(s) in 1 block(s) touched.
+
+$ guardian lineage b8_aggregate r2
+b8_aggregate@r2  FALLBACK  (run)
+└── as b6_enrich, via adapter demo.blocks:b5_to_b6_shape: b5_normalize@r2  FRESH  (run, version v1)
+    └── b4_clean@r2  FRESH  (run)
+        └── b3_standardize@r2  FRESH  (run)
+            └── b2_parse@r2  FRESH  (run, version v1)
+                └── b1_ingest@r2  FRESH  (run, version v1)
+```
+
+b5 has two dependents and no fallback edge replaces it, so its crash reaches further.
+b6 and b7 read the previous b5 snapshot (STALE), and b8 inherits that through b6:
+
+```
+$ guardian impact b5_normalize
+┏━━━━━━━━━━━━━━┳━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ snapshot     ┃ run ┃ relation   ┃ quality / outcome ┃ how                                      ┃
+┡━━━━━━━━━━━━━━╇━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ b5_normalize │ r3  │ self       │ ROLLBACK          │ crash                                    │
+│ b6_enrich    │ r3  │ downstream │ STALE             │ read b5_normalize: stale b5_normalize@r2 │
+│ b7_customers │ r3  │ downstream │ STALE             │ read b5_normalize: stale b5_normalize@r2 │
+│ b8_aggregate │ r3  │ downstream │ STALE             │ read b6_enrich@r3                        │
+└──────────────┴─────┴────────────┴───────────────────┴──────────────────────────────────────────┘
+b5_normalize: 1 degraded run(s); 3 downstream snapshot(s) in 3 block(s) touched.
+
+$ guardian lineage b8_aggregate r3
+b8_aggregate@r3  STALE  (run)
+└── b6_enrich@r3  STALE  (run, version v1)
+    └── stale b5_normalize (DEGRADED): b5_normalize@r2  FRESH  (run, version v1)
+        └── b4_clean@r2  FRESH  (run)
+            └── b3_standardize@r2  FRESH  (run)
+                └── b2_parse@r2  FRESH  (run, version v1)
+                    └── b1_ingest@r2  FRESH  (run, version v1)
+
+$ guardian impact b5_normalize --since r4
+b5_normalize: 0 degraded run(s); 0 downstream snapshot(s) in 0 block(s) touched.
+```
+
+A leaf block has nothing downstream, so its impact is only itself:
+
+```
+$ guardian run demo/pipeline.yaml --run-id r5 --fault b8_aggregate:crash
+$ guardian impact b8_aggregate
+┏━━━━━━━━━━━━━━┳━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┳━━━━━━━┓
+┃ snapshot     ┃ run ┃ relation ┃ quality / outcome ┃ how   ┃
+┡━━━━━━━━━━━━━━╇━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━╇━━━━━━━┩
+│ b8_aggregate │ r5  │ self     │ ROLLBACK          │ crash │
+└──────────────┴─────┴──────────┴───────────────────┴───────┘
+b8_aggregate: 1 degraded run(s); 0 downstream snapshot(s) in 0 block(s) touched.
+```
+
+`b7_customers` opts into the annotation, so its r3 output carries
+`_guardian_quality = STALE`, while its r1 output carries `FRESH`.
+
+**How it is tested.** Scenarios 8a–8f run for every DAG role, under both runners
+([`tests/scenarios/test_provenance.py`](tests/scenarios/test_provenance.py)):
+- a fallback reader is FALLBACK;
+- unprotected dependents are STALE;
+- a source fault degrades the whole downstream subgraph;
+- when both the fallback source and the block it replaces are down, the reader is STALE
+  and gets no adapter;
+- after a shadow promotion and replay, the next run is FRESH end to end.
+
+8f is a hypothesis property test. It places random faults (crash, corruption, OUT) over
+several runs, then checks `impact` for every block against four independent checks:
+- an upward search over the recorded lineage (`impact` itself searches downward);
+- the runner's own outcomes;
+- the DAG (only descendants are touched, and every dependent that ran is);
+- the quality flags.
+
 ## Design decisions
 
 ### Why the core is orchestrator-agnostic
@@ -685,7 +804,7 @@ with the min to max range. Full details, machine specs and raw samples are in
 ```
 guardian/
   core/        models, validation, snapshots, quarantine, events, planner, versions,
-               shadow, guardian facade
+               shadow, provenance, guardian facade
   runner/      spec_loader, executor, cli
   adapters/dagster/  io_manager, checks, replay, definitions
   demo/        data_gen, schemas, blocks, faults, pipeline.yaml

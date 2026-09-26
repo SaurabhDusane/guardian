@@ -15,7 +15,14 @@ import pandas as pd
 
 from guardian.core.events import EventKind
 from guardian.core.guardian import Guardian, new_run_id
-from guardian.core.models import Action, BlockStatus, DataRef, Decision, NoSafeInputError
+from guardian.core.models import (
+    Action,
+    BlockSkipped,
+    BlockStatus,
+    DataRef,
+    Decision,
+    NoSafeInputError,
+)
 from guardian.core.shadow import ShadowRun
 from guardian.runner.spec_loader import topological_order
 
@@ -102,6 +109,8 @@ class Executor:
         skip = g.skip_reason(block)
         has_candidate = g.shadow_candidate(block) is not None
         if skip is not None and not has_candidate:
+            # Through core anyway, so the skip is recorded like every other outcome.
+            g.complete_block(block, run_id, g.begin_block(block, run_id, []))
             return BlockReport(block, Outcome.SKIPPED, g.status(block), reason=skip)
         # A block in shadow still resolves its live inputs when it is OUT: the
         # candidate runs on them even though the live version does not.
@@ -116,6 +125,8 @@ class Executor:
                 refs.append(ref)
                 frames.append(g.read(ref))
         except NoSafeInputError as exc:
+            skipped = BlockSkipped(skip or str(exc), blocked=skip is None)
+            g.complete_block(block, run_id, skipped, inputs=[skipped])  # recorded in core
             return BlockReport(
                 block,
                 Outcome.SKIPPED if skip is not None else Outcome.BLOCKED,

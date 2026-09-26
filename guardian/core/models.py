@@ -141,6 +141,9 @@ class BlockSpec:
     # then receives it as its single input (so candidates see the same loaded data).
     load: str | None = None
     shadow: ShadowPolicy = field(default_factory=ShadowPolicy)
+    # Opt-in: append a ``_guardian_quality`` column (FRESH/STALE/FALLBACK) to this
+    # block's promoted output. Off by default: user frames are never changed silently.
+    annotate_quality: bool = False
 
     def __post_init__(self) -> None:
         validate_name(self.name, "block name")

@@ -24,6 +24,7 @@ _BLOCK_KEYS = {
     "active",
     "load",
     "shadow",
+    "annotate_quality",
 }
 _SHADOW_KEYS = {"required_runs", "max_changed_fraction", "min_pass_rate"}
 _FALLBACK_KEYS = {"replaces", "source", "adapter"}
@@ -142,11 +143,19 @@ def _parse_block(raw: Mapping[str, Any], where: str) -> BlockSpec:
             active=active,
             load=load,
             shadow=ShadowPolicy(**shadow_raw),
+            annotate_quality=_flag(raw, "annotate_quality", where),
         )
     except ValueError as exc:
         if isinstance(exc, SpecError):
             raise
         raise SpecError(f"{where}: {exc}") from exc
+
+
+def _flag(raw: Mapping[str, Any], key: str, where: str) -> bool:
+    value = raw.get(key, False)
+    if not isinstance(value, bool):
+        raise SpecError(f"{where}: '{key}' must be true or false")
+    return value
 
 
 def _parse_fallback(raw: Any, where: str) -> FallbackEdge:

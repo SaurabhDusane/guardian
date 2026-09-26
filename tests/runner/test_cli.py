@@ -190,3 +190,44 @@ def test_shadow_start_works_for_every_versioned_block(tmp_path, block) -> None:
     result = invoke("shadow", "status", block, "--root", root)
     assert "PARITY" in result.output and " no " in result.output  # v_bad is caught
     assert invoke("shadow", "stop", block, "--root", root).exit_code == 0
+
+
+@pytest.mark.parametrize("block", load_spec(find_spec(Path("demo/pipeline.yaml"))).block_names)
+def test_impact_and_lineage_work_for_every_block(tmp_path, block) -> None:
+    root = str(tmp_path)
+    invoke("run", "demo/pipeline.yaml", "--root", root, "--run-id", "r1")
+    invoke(
+        "run", "demo/pipeline.yaml", "--root", root, "--run-id", "r2", "--fault", f"{block}:crash"
+    )
+    result = invoke("impact", block, "--root", root)
+    assert result.exit_code == 0, result.output
+    assert f"{block}: 1 degraded run(s)" in result.output
+    result = invoke("impact", block, "--since", "r2", "--root", root)
+    assert result.exit_code == 0
+    assert "│ r1 " not in result.output and "│ r2 " in result.output  # the run column
+    result = invoke("lineage", block, "r1", "--root", root)
+    assert result.exit_code == 0 and f"{block}@r1" in result.output and "FRESH" in result.output
+
+
+def test_impact_lists_the_fallback_reader(tmp_path) -> None:
+    root = str(tmp_path)
+    invoke("run", "demo/pipeline.yaml", "--root", root, "--run-id", "r1")
+    invoke(
+        "run", "demo/pipeline.yaml", "--root", root, "--run-id", "r2", "--fault", "b6_enrich:crash"
+    )
+    result = invoke("impact", "b6_enrich", "--root", root)
+    assert "b8_aggregate" in result.output and "FALLBACK" in result.output
+    result = invoke("lineage", "b8_aggregate", "r2", "--root", root)
+    assert "as b6_enrich, via adapter demo.blocks:b5_to_b6_shape" in result.output
+
+
+def test_impact_and_lineage_reject_unknown_names(tmp_path) -> None:
+    root = str(tmp_path)
+    invoke("run", "demo/pipeline.yaml", "--root", root, "--run-id", "r1")
+    for args in (["impact", "no_such_block"], ["lineage", "no_such_block", "r1"]):
+        result = invoke(*args, "--root", root)
+        assert result.exit_code == 2 and "no_such_block" in result.output
+    result = invoke("impact", "b1_ingest", "--since", "zz", "--root", root)
+    assert result.exit_code == 2 and "no run 'zz'" in result.output
+    result = invoke("lineage", "b1_ingest", "zz", "--root", root)
+    assert result.exit_code == 2 and "no provenance" in result.output

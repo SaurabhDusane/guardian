@@ -101,7 +101,7 @@ def test_v2_matches_v1_and_v_bad_differs_on_messy_demo_data(tmp_path) -> None:
         for block in g.spec.blocks:
             if not block.versions:
                 continue
-            prov = g.snapshots.read_provenance(block.name, "r1")
+            prov = g.provenance.get(block.name, "r1").as_dict()
             inputs = [g.snapshots.read(i["block"], i["run_id"]) for i in prov["inputs"]]
             inputs = g.prepare_inputs(block.name, inputs)  # the loaded frame for a source
             v1, v2, bad = (g.version_fn(block.name, v)(*inputs) for v in ("v1", "v2", "v_bad"))
