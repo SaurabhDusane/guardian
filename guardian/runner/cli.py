@@ -36,6 +36,7 @@ from guardian.core.provenance import LineageNode
 from guardian.core.provenance import impact as compute_impact
 from guardian.core.provenance import lineage as compute_lineage
 from guardian.core.shadow import ShadowMode
+from guardian.observability import install as install_observability
 from guardian.runner.executor import Executor, Outcome, RunReport
 from guardian.runner.spec_loader import SpecError, load_spec
 
@@ -113,9 +114,14 @@ def _open(
             spec, registry = apply_faults(spec, by_block)
         except (KeyError, ValueError) as exc:
             raise typer.BadParameter(str(exc), param_hint="--fault") from exc
-    return Guardian(
-        spec, root, sample_rate=sample_rate, registry=registry, diagnoser=auto_diagnoser()
-    )
+    g = Guardian(spec, root, sample_rate=sample_rate, registry=registry, diagnoser=auto_diagnoser())
+    try:
+        install_observability(g)  # OpenLineage / OpenTelemetry, if enabled in the env
+    except GuardianError as exc:
+        g.close()
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    return g
 
 
 @app.command()

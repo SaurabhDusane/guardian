@@ -29,7 +29,7 @@ def test_no_block_names_in_core_runner_adapters_or_agent() -> None:
 
     root = Path(__file__).parents[2]
     names = load_spec(root / "guardian" / "demo" / "pipeline.yaml").block_names
-    for package in ("core", "runner", "adapters", "agent"):
+    for package in ("core", "runner", "adapters", "agent", "observability"):
         for path in (root / "guardian" / package).rglob("*.py"):
             text = path.read_text(encoding="utf-8")
             found = [n for n in names if n in text]
@@ -56,3 +56,15 @@ def test_agent_code_never_promotes_merges_or_changes_state() -> None:
         else:
             assert not found_calls, (path.name, found_calls)
         assert path.name == "safety.py" or not merges.findall(text), path.name
+
+
+def test_observability_is_optional_and_outside_core() -> None:
+    """Core never imports the exporters; the CLI imports them without OpenTelemetry
+    unless it is enabled."""
+    code = (
+        "import sys, guardian.core.guardian; "
+        "assert not any(m.startswith('guardian.observability') for m in sys.modules); "
+        "import guardian.runner.cli; "
+        "assert not any(m.startswith('opentelemetry') for m in sys.modules)"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True, cwd=Path(__file__).parents[2])

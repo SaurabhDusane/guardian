@@ -471,7 +471,7 @@ class Guardian:
             decision = self._rollback(
                 block, run_id, result.schema_error, total=total, good=0, bad=total
             )
-            self._record_run(block, run_id, "ROLLBACK", result.schema_error)
+            self._record_run(block, run_id, "ROLLBACK", result.schema_error, rows=(total, 0, total))
             return decision
 
         fraction = n_bad / total if total else 0.0
@@ -488,7 +488,7 @@ class Guardian:
                 decision = self._rollback(
                     block, run_id, reason, total=total, good=n_good, bad=n_bad
                 )
-                self._record_run(block, run_id, "ROLLBACK", reason)
+                self._record_run(block, run_id, "ROLLBACK", reason, rows=(total, 0, total))
                 return decision
         if fraction <= spec.quarantine_threshold:
             good = result.good
@@ -502,7 +502,7 @@ class Guardian:
                 EventKind.SNAPSHOT, block=block, run_id=run_id, rows=n_good, last_good=True
             )
             self._mark_after_run(block, BlockStatus.HEALTHY, run_id)
-            self._record_run(block, run_id, "PASS")
+            self._record_run(block, run_id, "PASS", rows=(total, n_good, n_bad))
             return Decision(block, run_id, Action.PASS, None, total, n_good, n_bad, snapshot=ref)
 
         # Too many bad rows: nothing is promoted, so the good rows are quarantined too
@@ -512,7 +512,7 @@ class Guardian:
         self._quarantine(block, run_id, pd.concat([result.bad, good_rows]), df)
         self._record_output(provenance, has_snapshot=False)
         decision = self._rollback(block, run_id, reason, total=total, good=n_good, bad=n_bad)
-        self._record_run(block, run_id, "ROLLBACK", reason)
+        self._record_run(block, run_id, "ROLLBACK", reason, rows=(total, 0, total))
         return decision
 
     def drift_reference(self, block: str, run_id: str) -> list[tuple[str, pd.DataFrame]]:
@@ -664,18 +664,45 @@ class Guardian:
         if provenance.store == LIVE and has_snapshot:
             self._quality_cache[(provenance.block, provenance.run_id)] = provenance.quality
 
-    def _record_run(self, block: str, run_id: str, outcome: str, reason: str | None = None):
+    def _record_run(
+        self,
+        block: str,
+        run_id: str,
+        outcome: str,
+        reason: str | None = None,
+        *,
+        rows: tuple[int, int, int] | None = None,
+    ):
+        """Record what ``block`` did on ``run_id`` and announce it (BLOCK_OUTCOME).
+
+        ``rows`` is (output rows, promoted, quarantined). Every outcome of every runner
+        passes through here, which makes BLOCK_OUTCOME the one event observability
+        exporters need to describe a block run.
+        """
         code = self.code_fingerprint(block)
+        status = self.status(block).value
+        version = self.active_version(block)
         self.provenance.record_run(
             BlockRun(
-                block,
-                run_id,
-                outcome,
-                self.status(block).value,
-                self.active_version(block),
-                reason,
-                code=code.sha if code else None,
+                block, run_id, outcome, status, version, reason, code=code.sha if code else None
             )
+        )
+        inputs = self.input_provenance(block, run_id)
+        total, promoted, quarantined = rows if rows is not None else (0, 0, 0)
+        self.events.emit(
+            EventKind.BLOCK_OUTCOME,
+            block=block,
+            run_id=run_id,
+            pipeline=self.spec.name,
+            outcome=outcome,
+            status=status,
+            version=version,
+            reason=reason,
+            quality=Quality.worst(i.quality for i in inputs).value,
+            rows_out=total,
+            rows_promoted=promoted,
+            rows_quarantined=quarantined,
+            inputs=[i.as_dict() for i in inputs],
         )
 
     def code_fingerprint(self, block: str, version: str | None = None) -> CodeFingerprint | None:

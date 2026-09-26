@@ -71,6 +71,7 @@ _SKIPPED_EVENTS = frozenset(
         EventKind.RUN_FINISHED,
         EventKind.BLOCK_STARTED,
         EventKind.BLOCK_FINISHED,
+        EventKind.BLOCK_OUTCOME,
         EventKind.SHADOW,
         EventKind.DIAGNOSIS,
         EventKind.PROPOSAL,

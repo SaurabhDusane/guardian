@@ -16,6 +16,7 @@ dependencies = [
 [project.optional-dependencies]
 dagster = ["dagster>=1.8", "dagster-webserver>=1.8"]
 agent = ["anthropic>=1.0"]
+observability = ["opentelemetry-exporter-otlp-proto-http>=1.25", "opentelemetry-sdk>=1.25"]
 
 [project.scripts]
 guardian = "guardian.runner.cli:main"

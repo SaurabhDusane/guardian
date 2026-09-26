@@ -11,6 +11,7 @@ import json
 import random
 import threading
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from enum import Enum, StrEnum
@@ -25,6 +26,7 @@ class EventKind(StrEnum):
     RUN_FINISHED = "RUN_FINISHED"
     BLOCK_STARTED = "BLOCK_STARTED"
     BLOCK_FINISHED = "BLOCK_FINISHED"
+    BLOCK_OUTCOME = "BLOCK_OUTCOME"  # what a block run did (every runner); see Guardian
     VALIDATION = "VALIDATION"
     SNAPSHOT = "SNAPSHOT"
     RESOLVE = "RESOLVE"
@@ -131,6 +133,10 @@ class EventLogger:
         # Call close() (or use the logger as a context manager) to release the file.
         self._con: duckdb.DuckDBPyConnection | None = None
         self._connection().execute(_SCHEMA)
+        # Called with every event, including ones sampled out of storage (sampling
+        # limits what is stored, not what observability exporters see).
+        self.listeners: list[Callable[[Event], None]] = []
+        self.listener_errors = 0
 
     def _connection(self) -> duckdb.DuckDBPyConnection:
         if self._con is None:
@@ -165,10 +171,11 @@ class EventLogger:
         """Record an event. Returns the Event, or None if it was sampled out."""
         kind = EventKind(kind)
         with self._lock:
+            event = Event(kind=kind, block=block, run_id=run_id, data=data)
+            self._notify(event)
             if not self.should_log(kind):
                 self.sampled_out += 1
                 return None
-            event = Event(kind=kind, block=block, run_id=run_id, data=data)
             line = event.to_json()
             with self.jsonl_path.open("a", encoding="utf-8", newline="\n") as fh:
                 fh.write(line + "\n")
@@ -184,6 +191,17 @@ class EventLogger:
                 ],
             )
             return event
+
+    def add_listener(self, listener: Callable[[Event], None]) -> None:
+        """Call ``listener(event)`` for every event emitted from now on."""
+        self.listeners.append(listener)
+
+    def _notify(self, event: Event) -> None:
+        for listener in self.listeners:
+            try:
+                listener(event)
+            except Exception:  # an exporter must never fail the pipeline
+                self.listener_errors += 1
 
     def query(
         self,

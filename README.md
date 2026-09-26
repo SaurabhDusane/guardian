@@ -1124,6 +1124,116 @@ Each limit below is enforced in code (`guardian/agent/safety.py`) and tested
 - **Never see redacted data.** Everything it is sent comes from the minimized
   evidence bundle.
 
+## Observability
+
+Guardian can export what it does to standard tools. OpenLineage run events go to
+lineage catalogs such as Marquez, and OpenTelemetry spans go to any tracing backend.
+Both are **off by default**, are configured through environment variables, and work
+in both modes: the CLI and the Dagster definitions install them.
+
+```bash
+uv sync --extra observability     # OpenTelemetry SDK + OTLP exporter (OpenLineage needs nothing)
+```
+
+| variable | effect |
+|---|---|
+| `GUARDIAN_OPENLINEAGE_URL` | POST run events to `<url>/api/v1/lineage` (Marquez) |
+| `GUARDIAN_OPENLINEAGE_FILE` | or append them to a JSON-lines file |
+| `GUARDIAN_OPENLINEAGE_CONSOLE=1` | or print them |
+| `GUARDIAN_OPENLINEAGE_NAMESPACE` | job and dataset namespace (default `guardian`) |
+| `GUARDIAN_OPENLINEAGE_API_KEY` | optional bearer token |
+| `GUARDIAN_OTEL=otlp` / `console` | export spans over OTLP/HTTP, or print them |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME` | standard OpenTelemetry settings |
+
+**How it hooks in.** Core only offers a generic hook: every event goes to registered
+listeners before sampling. Sampling limits what Guardian *stores*, not what exporters
+see. An exporter that raises is counted (`listener_errors`) and never fails a run.
+Every block outcome, under either runner, also emits a `BLOCK_OUTCOME` event with the
+decision, status, quality, row counts and input provenance. The exporters live in
+`guardian/observability/`, which core never imports.
+
+**OpenLineage.** Each block run is a run of job `<pipeline>.<block>`, a child (via the
+`parent` facet) of the pipeline run's job `<pipeline>`. It emits START when Guardian
+first reports on the block, then:
+
+| Guardian outcome | OpenLineage event |
+|---|---|
+| PASS | COMPLETE |
+| ROLLBACK, BLOCKED | FAIL (with `errorMessage`) |
+| SKIPPED (block OUT) | ABORT |
+
+Inputs are the snapshots **actually read**, with a `version` facet giving the run read.
+A custom `guardian_input` facet says which upstream the input stands in for, how it was
+read (FRESH / STALE / FALLBACK), through which adapter, and the upstream's status. A
+promoted output carries `outputStatistics.rowCount` and `guardian_quality`, and the run
+carries a `guardian_decision` facet. When b6 crashes, b8 reads b5 through the fallback
+adapter:
+
+```json
+{
+  "eventType": "COMPLETE",
+  "job": "demo.b8_aggregate",
+  "inputs": [{
+    "name": "demo.b5_normalize",
+    "facets": {
+      "version": {"datasetVersion": "r2"},
+      "guardian_input": {"upstream": "b6_enrich", "read": "FALLBACK", "fallback": true,
+                         "stale": false, "source": "b5_normalize@r2",
+                         "adapter": "demo.blocks:b5_to_b6_shape",
+                         "upstream_status": "DEGRADED", "quality": "FALLBACK"}
+    }
+  }]
+}
+```
+
+**OpenTelemetry.** One span per block run, `guardian.block <block>`, from Guardian's
+first report on the block to its outcome. Attributes:
+
+- `guardian.decision`, `guardian.status`, `guardian.quality`, `guardian.version`,
+  `guardian.reason`;
+- `guardian.rows.out`, `.promoted`, `.quarantined`;
+- `guardian.inputs` (`upstream <- block@run (READ)`), `guardian.inputs.stale` and
+  `.fallback` counts.
+
+ROLLBACK and BLOCKED spans have status ERROR. Under the standalone runner, block spans
+are children of a `guardian.run <pipeline>` span.
+
+### Local viewing stack
+
+[`observability/docker-compose.yml`](observability/docker-compose.yml) runs Marquez
+(API on :5000, UI on :3000), Tempo (OTLP/HTTP on :4318) and Grafana with Tempo
+preconfigured (:3001):
+
+```bash
+docker compose -f observability/docker-compose.yml up -d
+export GUARDIAN_OPENLINEAGE_URL=http://localhost:5000
+export GUARDIAN_OTEL=otlp OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+uv run guardian run demo/pipeline.yaml --run-id r1
+uv run guardian run demo/pipeline.yaml --run-id r2 --fault b6_enrich:crash
+# lineage: http://localhost:3000   traces: http://localhost:3001 (Explore → Tempo)
+```
+
+> **Screenshot placeholder: Marquez lineage graph.** It should show the `demo.*` jobs,
+> with `demo.b8_aggregate` on r2 reading `demo.b5_normalize` and the `guardian_input`
+> facet marking the FALLBACK read. To be captured on a machine with Docker; the build
+> environment for this phase had no Docker daemon.
+>
+> **Screenshot placeholder: Grafana / Tempo trace of run r2.** It should show one
+> `guardian.run demo` span with eight `guardian.block` children, `b6_enrich` in ERROR.
+
+The compose file is validated with `docker compose config`, and a test checks that it
+wires the services and mounted configs consistently. The stack itself has not been run
+here.
+
+**How it is tested.** The tests use in-memory exporters (`tests/observability/`):
+- a memory transport and the OTel SDK's `InMemorySpanExporter`, run under both the
+  standalone runner and the Dagster adapter;
+- well-formed START/COMPLETE pairs with parent facets for every block;
+- FALLBACK and STALE input facets picked by DAG role;
+- FAIL, ABORT and BLOCKED mappings, and span attributes and parents;
+- off-by-default configuration, the file transport through the CLI, and a failing
+  exporter that doesn't fail the run.
+
 ## Design decisions
 
 ### Why the core is orchestrator-agnostic
@@ -1273,7 +1383,9 @@ guardian/
   adapters/dagster/  io_manager, checks, replay, definitions
   agent/       evidence bundles, LLM diagnosis (Anthropic + fake clients), fix
                proposals (propose), safety guards, eval
+  observability/  OpenLineage run events and OpenTelemetry spans (optional, via env)
   demo/        data_gen, schemas, blocks, faults, refactor (code_bug), pipeline.yaml
+observability/  docker-compose with Marquez, Tempo and Grafana for local viewing
 bench/
   run_bench.py throughput / recovery / overhead benchmarks -> bench/results.md
   agent_eval.md  written by `guardian eval diagnose` (real model; manual)
@@ -1285,6 +1397,7 @@ tests/
   demo/        demo blocks and fault injection
   adapters/    Dagster adapter wiring
   agent/       evidence, diagnosis validation and clients, eval (FakeClient only)
+  observability/  OpenLineage and OpenTelemetry exporters (in-memory exporters)
   scenarios/   fault-injection suite, parametrized over DAG roles and both runners
   bench/       smoke test for the benchmark script
 ```

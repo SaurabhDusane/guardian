@@ -28,6 +28,7 @@ from guardian.adapters.dagster.replay import REPLAY_IO_MANAGER_KEY, build_replay
 from guardian.agent.diagnose import auto_diagnoser
 from guardian.core.guardian import Guardian
 from guardian.core.models import DEFAULT_STORAGE_ROOT, BlockSpec, PipelineSpec
+from guardian.observability import install as install_observability
 from guardian.runner.spec_loader import load_spec
 
 PIPELINE_JOB = "guardian_pipeline"
@@ -95,6 +96,7 @@ def definitions_for(
     # Blocks with auto_diagnose get an advisory diagnosis after a ROLLBACK (core calls
     # the hook; LLM settings come from the environment).
     guardian = Guardian(spec, root, registry=registry, diagnoser=auto_diagnoser())
+    install_observability(guardian)  # OpenLineage / OpenTelemetry, if enabled in the env
     guardian.close()  # release the event DB until first use; it reopens lazily
     return build_definitions(guardian)
 
