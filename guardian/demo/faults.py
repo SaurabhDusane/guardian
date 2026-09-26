@@ -54,20 +54,36 @@ def _corrupt_value(series: pd.Series) -> object:
     return CORRUPT_TEXT
 
 
-def corrupt_rows(fraction: float, columns: Sequence[str] | None = None, seed: int = 0) -> Fault:
+def corrupt_rows(
+    fraction: float,
+    columns: Sequence[str] | None = None,
+    seed: int = 0,
+    *,
+    unique: bool = False,
+) -> Fault:
     """Overwrite ``columns`` (default: all) in a fraction of rows with invalid values.
 
     Numbers become -999999, text becomes ``"__corrupt__"``, datetimes become NaT;
-    column dtypes are preserved so the damage is row-level, not schema-level.
+    column dtypes are preserved so the damage is row-level, not schema-level. With
+    ``unique=True`` each corrupted row gets distinct values (-999999 - i,
+    ``"__corrupt__<i>"``), so corrupting a key column does not create duplicate keys.
     """
 
     def apply(df: pd.DataFrame) -> pd.DataFrame:
         out = df.copy()
         rows = pick_positions(len(out), fraction, seed)
+        if not len(rows):
+            return out
         for column in columns or list(out.columns):
             value = _corrupt_value(out[column])
-            if value is not None and len(rows):
-                out.iloc[rows, out.columns.get_loc(column)] = value
+            if value is None:
+                continue
+            if unique and value is not pd.NaT:
+                if isinstance(value, str):
+                    value = [f"{value}{i}" for i in range(len(rows))]
+                else:
+                    value = [value - i for i in range(len(rows))]
+            out.iloc[rows, out.columns.get_loc(column)] = value
         return out
 
     return Fault(f"corrupt_rows({fraction})", apply)

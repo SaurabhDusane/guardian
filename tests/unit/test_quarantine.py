@@ -133,3 +133,9 @@ def test_restore_dtypes_leaves_uncastable_columns() -> None:
     frame = pd.DataFrame({"n": ["1", "oops"], "extra": [1, 2]})
     restored = restore_dtypes(frame, {"n": pd.Series([1]).dtype, "missing": "int64"})
     assert restored["n"].tolist() == ["1", "oops"]
+
+
+def test_rows_to_payloads_one_per_row_even_without_columns() -> None:
+    no_columns = pd.DataFrame(index=range(3))
+    assert no_columns.empty  # pandas calls it empty, but it has 3 rows
+    assert rows_to_payloads(no_columns) == ["{}", "{}", "{}"]

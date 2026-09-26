@@ -1,6 +1,10 @@
+from pathlib import Path
+
+import pytest
 from typer.testing import CliRunner
 
-from guardian.runner.cli import app
+from guardian.runner.cli import app, find_spec
+from guardian.runner.spec_loader import load_spec
 
 runner = CliRunner()
 
@@ -92,3 +96,45 @@ def test_replay_twice_and_refresh_only(tmp_path) -> None:
 def test_only_rejects_unknown_block(tmp_path) -> None:
     result = invoke("run", "demo/pipeline.yaml", "--root", str(tmp_path), "--only", "nope")
     assert result.exit_code != 0
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["replay", "no_such_block"],
+        ["set-status", "no_such_block", "OUT"],
+        ["run", "demo/pipeline.yaml", "--only", "no_such_block"],
+        ["run", "demo/pipeline.yaml", "--fault", "no_such_block:crash"],
+    ],
+    ids=["replay", "set-status", "run-only", "run-fault"],
+)
+def test_block_commands_reject_unknown_block_clearly(tmp_path, args) -> None:
+    root = str(tmp_path)
+    invoke("run", "demo/pipeline.yaml", "--root", root, "--run-id", "r1")
+    result = invoke(*args, "--root", root)
+    assert result.exit_code != 0
+    assert "no_such_block" in result.output
+
+
+@pytest.mark.parametrize("block", load_spec(find_spec(Path("demo/pipeline.yaml"))).block_names)
+def test_block_commands_work_for_every_block(tmp_path, block) -> None:
+    root = str(tmp_path)
+    assert invoke("run", "demo/pipeline.yaml", "--root", root, "--run-id", "r1").exit_code == 0
+    assert invoke("set-status", block, "OUT", "--root", root).exit_code == 0
+    assert invoke("set-status", block, "HEALTHY", "--root", root).exit_code == 0
+    result = invoke("replay", block, "--root", root)
+    assert result.exit_code == 0, result.output
+    result = invoke(
+        "run", "demo/pipeline.yaml", "--root", root, "--run-id", "r2",
+        "--fault", f"{block}:crash", "--only", block,
+    )  # fmt: skip
+    assert result.exit_code == 0 and "ROLLBACK" in result.output, result.output
+
+
+def test_stale_reads_are_visible_in_the_summary(tmp_path) -> None:
+    root = str(tmp_path)
+    invoke("run", "demo/pipeline.yaml", "--root", root, "--run-id", "r1")
+    result = invoke(
+        "run", "demo/pipeline.yaml", "--root", root, "--run-id", "r2", "--fault", "b2_parse:crash"
+    )
+    assert "b2_parse@r1 (stale)" in result.output

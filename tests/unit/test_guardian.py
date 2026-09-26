@@ -68,6 +68,12 @@ def test_schema_level_failure_rolls_back(guardian) -> None:
     assert guardian.snapshots.last_good("b1").run_id == "r0"
 
 
+def test_output_with_rows_but_no_columns_is_quarantined(guardian) -> None:
+    decision = guardian.on_output("b1", "r1", pd.DataFrame(index=range(4)))
+    assert decision.action is Action.ROLLBACK and "missing column" in decision.reason
+    assert len(guardian.quarantine.list(block="b1", run_id="r1")) == 4
+
+
 def test_pass_after_degraded_restores_health(guardian) -> None:
     guardian.on_output("b1", "r1", pd.DataFrame({"id": [1]}))
     assert guardian.status("b1") is BlockStatus.DEGRADED

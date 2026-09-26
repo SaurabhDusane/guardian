@@ -105,3 +105,12 @@ def test_parse_fault_drift(df) -> None:
 def test_parse_fault_rejects(text) -> None:
     with pytest.raises(ValueError):
         parse_fault(text)
+
+
+def test_corrupt_rows_unique_values(df) -> None:
+    out = corrupt_rows(0.25, seed=3, unique=True)(df)
+    hit = out["s"].str.startswith(CORRUPT_TEXT)
+    assert hit.sum() == 5
+    assert out.loc[hit, "s"].is_unique and out.loc[hit, "n"].is_unique
+    assert (out.loc[hit, "n"] <= CORRUPT_NUMBER).all()
+    assert out.dtypes.equals(df.dtypes)

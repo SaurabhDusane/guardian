@@ -103,8 +103,9 @@ def run(
     fault: list[str] | None = typer.Option(
         None,
         "--fault",
-        help="Inject a fault for this run (repeatable), e.g. b6_enrich:corrupt:0.5:region "
-        "or b6_enrich:crash. Forms: corrupt, null, drop, rename, crash.",
+        help="Inject a fault into any block for this run (repeatable): "
+        "BLOCK:corrupt:FRACTION[:COL,COL] | BLOCK:null:COL:FRACTION | BLOCK:drop:COL[,COL] | "
+        "BLOCK:rename:OLD=NEW | BLOCK:crash.",
     ),
     only: list[str] | None = typer.Option(
         None, "--only", help="Run only these blocks (repeatable); others are not executed."
@@ -144,7 +145,7 @@ def render_report(report: RunReport) -> Table:
             ref.block
             + (f"@{ref.run_id}" if ref.run_id != report.run_id else "")
             + (f" (fallback for {ref.requested})" if ref.rerouted else "")
-            + (" [stale]" if ref.stale else "")
+            + (" (stale)" if ref.stale else "")
             for ref in r.sources
         )
         table.add_row(

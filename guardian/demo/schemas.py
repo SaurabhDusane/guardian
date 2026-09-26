@@ -91,3 +91,15 @@ AggregateSchema = pa.DataFrameSchema(
     unique=["order_date", "region", "segment"],
     name="AggregateSchema",
 )
+
+CustomerSchema = pa.DataFrameSchema(
+    {
+        "customer_id": pa.Column(str, pa.Check.str_matches(r"^C\d{4}$")),
+        "orders": pa.Column("int64", pa.Check.ge(1), coerce=True),
+        "revenue_usd": pa.Column(float, pa.Check.gt(0), coerce=True),
+        "first_order_date": pa.Column(str, pa.Check.str_matches(r"^\d{4}-\d{2}-\d{2}$")),
+        "last_order_date": pa.Column(str, pa.Check.str_matches(r"^\d{4}-\d{2}-\d{2}$")),
+    },
+    unique=["customer_id"],
+    name="CustomerSchema",
+)

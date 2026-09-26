@@ -49,8 +49,19 @@ def _number(series: pd.Series) -> pd.Series:
 # ---------------------------------------------------------------- b1
 
 
-def ingest(loader: str = DEFAULT_LOADER, **loader_kwargs: Any) -> pd.DataFrame:
-    """b1: load the raw dataset through a DatasetLoader named by ``loader``."""
+def ingest(
+    replayed: pd.DataFrame | None = None,
+    *,
+    loader: str = DEFAULT_LOADER,
+    **loader_kwargs: Any,
+) -> pd.DataFrame:
+    """b1: load the raw dataset through a DatasetLoader named by ``loader``.
+
+    On replay Guardian passes the quarantined raw rows back in; a source cannot
+    regenerate them, so they are returned unchanged for re-validation.
+    """
+    if replayed is not None:
+        return replayed.copy()
     return load_ref(loader)(**loader_kwargs).load()
 
 
@@ -169,7 +180,12 @@ def b5_to_b6_shape(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def aggregate(df: pd.DataFrame) -> pd.DataFrame:
-    """b8: daily revenue by region and segment (completed orders only)."""
+    """b8: daily revenue by region and segment (completed orders only).
+
+    Already-aggregated rows (a replay of this block's own output) pass through.
+    """
+    if "orders" in df.columns and "status" not in df.columns:
+        return df.copy()
     done = df[df["status"] == "completed"]
     grouped = (
         done.groupby(["order_date", "region", "segment"], as_index=False)
@@ -182,3 +198,29 @@ def aggregate(df: pd.DataFrame) -> pd.DataFrame:
     )
     grouped["revenue_usd"] = grouped["revenue_usd"].round(2)
     return grouped
+
+
+# ---------------------------------------------------------------- b7
+
+
+def customers(df: pd.DataFrame) -> pd.DataFrame:
+    """b7: per-customer order summary (orders without a customer id are skipped).
+
+    Already-summarized rows (a replay of this block's own output) pass through.
+    """
+    if "first_order_date" in df.columns:
+        return df.copy()
+    known = df[df["customer_id"].notna()]
+    summary = (
+        known.groupby("customer_id", as_index=False)
+        .agg(
+            orders=("order_id", "count"),
+            revenue_usd=("amount_usd", "sum"),
+            first_order_date=("order_date", "min"),
+            last_order_date=("order_date", "max"),
+        )
+        .sort_values("customer_id", ignore_index=True)
+    )
+    summary["customer_id"] = summary["customer_id"].astype(str)
+    summary["revenue_usd"] = summary["revenue_usd"].round(2)
+    return summary

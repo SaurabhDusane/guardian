@@ -71,7 +71,7 @@ class Executor:
         """Run every block, or just the blocks in ``only`` (in topological order).
 
         Unselected blocks are not executed; selected blocks read their inputs' last-good
-        snapshots as usual (e.g. to refresh b8 after replaying b6).
+        snapshots as usual (e.g. to refresh a block's dependents after a replay).
         """
         g = self.guardian
         run_id = run_id or new_run_id()

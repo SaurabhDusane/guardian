@@ -4,6 +4,11 @@
 #
 # b8_aggregate normally reads b6_enrich. If b6 is DEGRADED (failed validation or
 # crashed) or taken OUT, b8 reads b5_normalize instead, reshaped by b5_to_b6_shape.
+# b7_customers also reads b5_normalize, so b5 feeds two dependents.
+#
+# DAG roles (tests pick blocks by role, see tests/helpers/roles.py):
+#   source: b1   leaf: b7, b8   fallback_protected: b6   fallback_source: b5
+#   multi_dependent: b5   unprotected: b1-b5
 name: demo
 blocks:
   - name: b1_ingest
@@ -49,6 +54,13 @@ blocks:
     merge_key: [order_id]
     inputs: [b5_normalize]
     schema: demo.schemas:EnrichedSchema
+    quarantine_threshold: 0.1
+
+  - name: b7_customers
+    fn: demo.blocks:customers
+    merge_key: [customer_id]
+    inputs: [b5_normalize]
+    schema: demo.schemas:CustomerSchema
     quarantine_threshold: 0.1
 
   - name: b8_aggregate

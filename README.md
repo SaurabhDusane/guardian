@@ -53,7 +53,7 @@ flowchart LR
 | Core | `guardian/core/` | Models, validation, snapshot and quarantine stores, event log, reroute planner, `Guardian` facade. All repair semantics live here. |
 | Standalone adapter | `guardian/runner/` | YAML → `PipelineSpec` (DAG checks), topological executor, `guardian` CLI. |
 | Dagster adapter | `guardian/adapters/dagster/` | IO manager (`handle_output` → core, `load_input` → `resolve_input`), `guardian_validation` asset checks, `guardian_replay` job, `Definitions` built from the same YAML. |
-| Demo | `guardian/demo/` | Messy synthetic orders behind a `DatasetLoader` interface, blocks b1–b6 and b8, schemas, fault injection. |
+| Demo | `guardian/demo/` | Messy synthetic orders behind a `DatasetLoader` interface, blocks b1–b8 (every DAG role is represented), schemas, fault injection. |
 
 ## Quickstart
 
@@ -139,9 +139,15 @@ both runners.
 | Upstream status | Fallback edge for (block, upstream)? | Reads |
 |---|---|---|
 | `HEALTHY` | n/a | upstream's latest last-good snapshot |
-| `DEGRADED` or `OUT` | yes, and the source has a last-good | the fallback source's last-good, passed through the edge's `adapter` |
-| `DEGRADED` or `OUT` | no (or the source has no snapshot) | upstream's last-good, marked `stale` |
-| any | nothing above exists | `NoSafeInputError`; the block is reported `BLOCKED` and the rest of the pipeline continues |
+| `DEGRADED` or `OUT` | yes, and the fallback source is `HEALTHY` with a last-good | the fallback source's last-good, passed through the edge's `adapter` |
+| `DEGRADED` or `OUT` | no, or the fallback source is itself `DEGRADED`/`OUT` (or has no snapshot) | upstream's last-good, marked `stale`, with **no** adapter |
+| `DEGRADED` or `OUT` | upstream has no last-good either | `NoSafeInputError`; the block is reported `BLOCKED` and the rest of the pipeline continues |
+| `HEALTHY` | upstream has never been promoted | `NoSafeInputError` (as above) |
+
+An unhealthy fallback source is never used, even if it has a snapshot: when several
+blocks are unhealthy at once, a consumer falls back to stale data from the block it
+actually depends on. A source block (no inputs) that is `DEGRADED` or `OUT` needs no
+special case: its dependents follow the same table.
 
 Every resolution emits a `RESOLVE` or `REROUTE` event naming the source actually read.
 
@@ -170,16 +176,25 @@ Every resolution emits a `RESOLVE` or `REROUTE` event naming the source actually
 events are sampled at `--sample-rate`, while `WARN`, `ERROR`, `ROLLBACK`, `REROUTE` and
 `QUARANTINE` are always kept.
 
-## Walkthrough: heavy corruption in b6 (scenario 3)
+## Walkthrough: heavy corruption in one block (scenario 3)
 
 The demo pipeline turns messy e-commerce orders into daily revenue by region and
-customer segment:
+customer segment, plus a per-customer summary:
 
 ```
-b1_ingest → b2_parse → b3_standardize → b4_clean → b5_normalize → b6_enrich → b8_aggregate
-                                                          └──── fallback for b6 ────┘
-                                                               (adapter b5_to_b6_shape)
+b1_ingest → b2_parse → b3_standardize → b4_clean → b5_normalize ─┬→ b6_enrich → b8_aggregate
+                                                                  │      └─ fallback for b6 ─┘
+                                                                  │         (adapter b5_to_b6_shape)
+                                                                  └→ b7_customers
 ```
+
+**This walkthrough uses b6, but nothing in Guardian is specific to b6.** Every command
+takes the block name as an argument and works for any block in the spec. What happens to
+a failing block's dependents depends only on its role in the DAG: a fallback edge that
+replaces it, no fallback, or no dependents at all. The scenario suite runs the same
+failures against one block of every role (see [Testing by DAG role](#testing-by-dag-role)),
+and [a second example below](#the-same-flow-on-another-block-b2_parse) runs the flow on
+`b2_parse`, which has no fallback.
 
 **1. A normal run.** The raw data is deliberately messy: the 57 rows quarantined in b1–b4
 fall under their thresholds, so every block passes.
@@ -196,9 +211,10 @@ $ guardian run demo/pipeline.yaml --run-id r1
 │ b4_clean       │ PASS    │ HEALTHY │     462 │      443 │          19 │ b3_standardize │      │
 │ b5_normalize   │ PASS    │ HEALTHY │     443 │      443 │           0 │ b4_clean       │      │
 │ b6_enrich      │ PASS    │ HEALTHY │     443 │      443 │           0 │ b5_normalize   │      │
+│ b7_customers   │ PASS    │ HEALTHY │     443 │      115 │           0 │ b5_normalize   │      │
 │ b8_aggregate   │ PASS    │ HEALTHY │     443 │      130 │           0 │ b6_enrich      │      │
 └────────────────┴─────────┴─────────┴─────────┴──────────┴─────────────┴────────────────┴──────┘
-run r1: 7 blocks, 57 rows quarantined. Storage: .guardian
+run r1: 8 blocks, 57 rows quarantined. Storage: .guardian
 ```
 
 **2. b6 goes bad.** We inject a fault that corrupts the `region` and `segment` columns
@@ -217,10 +233,11 @@ $ guardian run demo/pipeline.yaml --run-id r2 --fault b6_enrich:corrupt:0.5:regi
 │ b5_normalize   │ PASS     │ HEALTHY  │     443 │      443 │           0 │ b4_clean                  │                          │
 │ b6_enrich      │ ROLLBACK │ DEGRADED │     443 │        0 │         443 │ b5_normalize              │ bad-row fraction 0.5011  │
 │                │          │          │         │          │             │                           │ exceeds threshold 0.1    │
+│ b7_customers   │ PASS     │ HEALTHY  │     443 │      115 │           0 │ b5_normalize              │                          │
 │ b8_aggregate   │ PASS     │ HEALTHY  │     443 │       98 │           0 │ b5_normalize (fallback    │                          │
 │                │          │          │         │          │             │ for b6_enrich)            │                          │
 └────────────────┴──────────┴──────────┴─────────┴──────────┴─────────────┴───────────────────────────┴──────────────────────────┘
-run r2: 7 blocks, 500 rows quarantined. Storage: .guardian
+run r2: 8 blocks, 500 rows quarantined. Storage: .guardian
 ```
 
 This single run shows all three repair actions:
@@ -231,7 +248,8 @@ This single run shows all three repair actions:
   whole was rejected.
 - **Reroute.** b8 reads *this run's* b5 output through `b5_to_b6_shape`, so the revenue
   numbers are current. Only the segment breakdown is lost: segments are `unassigned` on
-  that path, which is why b8 has 98 rows instead of 130.
+  that path, which is why b8 has 98 rows instead of 130. b7 does not depend on b6 and is
+  unaffected.
 
 The event log records why:
 
@@ -259,6 +277,7 @@ $ guardian status
 │ b4_clean       │ HEALTHY  │ r2            │ 38          │ 0        │
 │ b5_normalize   │ HEALTHY  │ r2            │ 0           │ 0        │
 │ b6_enrich      │ DEGRADED │ r1            │ 443         │ 0        │
+│ b7_customers   │ HEALTHY  │ r2            │ 0           │ 0        │
 │ b8_aggregate   │ HEALTHY  │ r2            │ 0           │ 0        │
 └────────────────┴──────────┴───────────────┴─────────────┴──────────┘
 ```
@@ -272,13 +291,13 @@ recovered row replaces its r1 version, and the new snapshot has 443 rows with un
 
 ```
 $ guardian replay b6_enrich
-b6_enrich: replayed 443, still failing 0, upserted into new last-good snapshot replay-20260926T022345-5f3970
+b6_enrich: replayed 443, still failing 0, upserted into new last-good snapshot replay-20260926T044256-18041e
 
 $ guardian replay b6_enrich
 b6_enrich: replayed 0, still failing 0 (nothing to replay)
 
 $ guardian status
-┃ b6_enrich      │ HEALTHY │ replay-20260926T022345-5f3970 │ 0           │ 443      │
+│ b6_enrich      │ HEALTHY │ replay-20260926T044256-18041e │ 0           │ 443      │
 ```
 
 b6 is `HEALTHY` again, with a new promoted snapshot. Its 443 records are still in
@@ -287,15 +306,18 @@ quarantine, now marked `REPLAYED`.
 **5. Refresh b8.** b8's r2 output was computed on the fallback path. Re-running just b8
 reads the recovered b6 snapshot, and the result is identical to the clean r1 aggregates:
 the same 130 rows with the same values. The scenario suite asserts this under both runners
-(`test_b8_after_replay_matches_clean_run`).
+for the fallback-protected block's descendants
+(`test_descendants_after_replay_match_clean_run`).
 
 ```
 $ guardian run demo/pipeline.yaml --run-id r3 --only b8_aggregate
+                                                Pipeline 'demo' - run r3
 ┏━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━┓
 ┃ block        ┃ outcome ┃ status  ┃ rows in ┃ promoted ┃ quarantined ┃ read from                               ┃ note ┃
 ┡━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━┩
-│ b8_aggregate │ PASS    │ HEALTHY │     443 │      130 │           0 │ b6_enrich@replay-20260926T022345-5f3970 │      │
+│ b8_aggregate │ PASS    │ HEALTHY │     443 │      130 │           0 │ b6_enrich@replay-20260926T044256-18041e │      │
 └──────────────┴─────────┴─────────┴─────────┴──────────┴─────────────┴─────────────────────────────────────────┴──────┘
+run r3: 1 blocks, 0 rows quarantined. Storage: .guardian
 ```
 
 > **Note: replay needs a `merge_key` to merge.** Without one, replay does not append
@@ -311,9 +333,38 @@ $ guardian run demo/pipeline.yaml --run-id r3 --only b8_aggregate
 > The matching `WARN` event, which is never sampled out, records the snapshot name and the
 > unchanged last-good run. Every demo block declares a `merge_key`.
 
-The same scenario runs under Dagster in `tests/scenarios` (`test_b6_heavy_corruption[dagster]`).
-There, b6's `guardian_validation` check fails with `outcome=ROLLBACK`, and b8's input is
-loaded from b5 by the IO manager.
+The same scenario runs under Dagster in `tests/scenarios`. There, the failing block's
+`guardian_validation` check fails with `outcome=ROLLBACK`, and its dependents' inputs are
+resolved by the IO manager.
+
+### The same flow on another block: b2_parse
+
+b2 has no fallback edge (role `unprotected`), so when it crashes its dependent b3 reads
+b2's last-good snapshot, marked `(stale)`, with no adapter. Everything downstream still
+runs, on data that is one run old at b2:
+
+```
+$ guardian run demo/pipeline.yaml --run-id r4 --fault b2_parse:crash
+                                        Pipeline 'demo' - run r4
+┏━━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━┓
+┃ block          ┃ outcome  ┃ status   ┃ rows in ┃ promoted ┃ quarantined ┃ read from           ┃ note  ┃
+┡━━━━━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━┩
+│ b1_ingest      │ PASS     │ HEALTHY  │       0 │      498 │           2 │ -                   │       │
+│ b2_parse       │ ROLLBACK │ DEGRADED │     498 │        0 │           0 │ b1_ingest           │ crash │
+│ b3_standardize │ PASS     │ HEALTHY  │     475 │      462 │          13 │ b2_parse@r2 (stale) │       │
+│ b4_clean       │ PASS     │ HEALTHY  │     462 │      443 │          19 │ b3_standardize      │       │
+│ b5_normalize   │ PASS     │ HEALTHY  │     443 │      443 │           0 │ b4_clean            │       │
+│ b6_enrich      │ PASS     │ HEALTHY  │     443 │      443 │           0 │ b5_normalize        │       │
+│ b7_customers   │ PASS     │ HEALTHY  │     443 │      115 │           0 │ b5_normalize        │       │
+│ b8_aggregate   │ PASS     │ HEALTHY  │     443 │      130 │           0 │ b6_enrich           │       │
+└────────────────┴──────────┴──────────┴─────────┴──────────┴─────────────┴─────────────────────┴───────┘
+run r4: 8 blocks, 34 rows quarantined. Storage: .guardian
+```
+
+b2 is `DEGRADED` and nothing was quarantined, because a crash produces no rows. Once b2
+is fixed (here: the next run without the fault), it passes, returns to `HEALTHY`, and b3
+reads it fresh again. `guardian replay b2_parse` works the same way as for b6 whenever b2
+has quarantined rows.
 
 ## Design decisions
 
@@ -396,9 +447,42 @@ The invariant is tested at three levels:
   equal the rows of the snapshot it read. End to end, every ingested row is either in
   the final snapshot or quarantined somewhere upstream.
 
+### Testing by DAG role
+
+Guardian's code never names a block: every behaviour comes from the spec. The tests follow
+the same rule. `tests/helpers/roles.py` classifies every block of a spec by its role in
+the DAG:
+
+| Role | Meaning | Demo block used |
+|---|---|---|
+| `source` | no inputs | b1_ingest |
+| `leaf` | no dependents | b7_customers (b8 also qualifies) |
+| `fallback_protected` | a dependent has a fallback edge replacing it | b6_enrich |
+| `unprotected` | has dependents, none with a fallback edge replacing it | b2_parse (b1–b5 qualify) |
+| `fallback_source` | is the source of some fallback edge | b5_normalize |
+| `multi_dependent` | two or more dependents | b5_normalize |
+
+`representative(spec, role)` picks the block with the fewest other roles. The minor
+corruption, heavy failure (corruption and schema drift), crash, taken-OUT and replay
+scenarios each run once per role, under both runners. Expectations are derived from the
+spec, not written per block:
+
+- **All roles:** every other block passes on this run's data.
+- **Dependents:** a dependent with a healthy fallback edge reads through the adapter;
+  any other dependent reads `STALE` data.
+- **Leaf:** nothing reroutes.
+- **Replay:** faults corrupt only the columns a block derives itself. Replay recovers
+  every row the fixed block can re-derive, recovers the rolled-back batch's collateral
+  rows for every role, and leaves the rest quarantined.
+
+The multi-failure rules (the fallback source is unhealthy too; no last-good anywhere)
+have their own scenarios. The demo spec contains every role;
+`tests/unit/test_roles.py` checks that.
+
 ## Results
 
-Demo pipeline at 100,000 generated rows, 5 runs per configuration, on a 4-core Intel Xeon
+Demo pipeline at 100,000 generated rows, 5 runs per configuration, measured before
+`b7_customers` was added to the demo (so the pipeline had 7 blocks), on a 4-core Intel Xeon
 @ 2.10 GHz cloud container (Python 3.11, pandas 3.0, DuckDB 1.5). The figures are medians
 with the min to max range. Full details, machine specs and raw samples are in
 [`bench/results.md`](bench/results.md); reproduce with `uv run python bench/run_bench.py`
@@ -431,10 +515,11 @@ guardian/
 bench/
   run_bench.py throughput / recovery / overhead benchmarks -> bench/results.md
 tests/
-  unit/        per-module core tests, invariant property test, layering test
+  helpers/     blocks_by_role (DAG roles) and block profiles, shared by the tests
+  unit/        per-module core tests, invariant property test, layering test, role helper
   runner/      spec loader, executor, CLI
   demo/        demo blocks and fault injection
   adapters/    Dagster adapter wiring
-  scenarios/   fault-injection suite, parametrized over the standalone and Dagster runners
+  scenarios/   fault-injection suite, parametrized over DAG roles and both runners
   bench/       smoke test for the benchmark script
 ```

@@ -13,8 +13,8 @@ def load_ref(ref: str, registry: Mapping[str, Any] | None = None) -> Any:
     ``registry`` is consulted first (exact key match), which lets callers and tests
     inject objects without importable modules. Otherwise ``ref`` must look like
     ``"package.module:attr.sub"``. A module that is not importable as written is
-    retried under the ``guardian.`` package, so ``demo.blocks:ingest`` resolves to
-    ``guardian.demo.blocks``.
+    retried under the ``guardian.`` package, so ``pkg.mod:fn`` also resolves as
+    ``guardian.pkg.mod:fn``.
     """
     if registry is not None and ref in registry:
         return registry[ref]

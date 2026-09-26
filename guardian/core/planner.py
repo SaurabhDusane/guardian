@@ -23,10 +23,13 @@ def plan_input(
     """Return the snapshot ``block`` should read in place of ``upstream``'s output.
 
     - upstream HEALTHY: upstream's last-good snapshot.
-    - upstream DEGRADED/OUT: the fallback source's last-good (with the edge's adapter)
-      if a fallback edge exists and that source has one; otherwise upstream's last-good
-      (marked stale).
-    - no candidate has a last-good snapshot: NoSafeInputError.
+    - upstream DEGRADED/OUT (including a source block, which has no inputs itself):
+      1. a fallback edge exists for (block, upstream) AND its fallback source is HEALTHY
+         with a last-good snapshot: read that, through the edge's adapter;
+      2. otherwise upstream's last-good snapshot, marked stale, with no adapter. This
+         covers the fallback source being DEGRADED/OUT too: an unhealthy fallback is
+         never used;
+      3. otherwise NoSafeInputError.
     """
     consumer = spec.block(block)
     if upstream not in consumer.inputs:
@@ -42,23 +45,28 @@ def plan_input(
         return DataRef(block=ref.block, run_id=ref.run_id, requested=upstream)
 
     edge = consumer.fallback_for(upstream)
+    fallback_note = ""
     if edge is not None:
+        source_status = status_of(edge.source)
         fallback = last_good_of(edge.source)
-        if fallback is not None:
+        if source_status is BlockStatus.HEALTHY and fallback is not None:
             return DataRef(
                 block=fallback.block,
                 run_id=fallback.run_id,
                 requested=upstream,
                 adapter=edge.adapter,
-                stale=status_of(edge.source) is not BlockStatus.HEALTHY,
             )
+        fallback_note = (
+            f"; fallback source {edge.source!r} is {source_status.value}"
+            if source_status is not BlockStatus.HEALTHY
+            else f"; fallback source {edge.source!r} has no last-good snapshot"
+        )
 
     ref = last_good_of(upstream)
     if ref is not None:
         return DataRef(block=ref.block, run_id=ref.run_id, requested=upstream, stale=True)
 
-    tried = [upstream] + ([edge.source] if edge is not None else [])
     raise NoSafeInputError(
-        f"{block!r} cannot read {upstream!r} ({status.value}): "
-        f"no last-good snapshot for any of {tried}"
+        f"{block!r} cannot read {upstream!r} ({status.value}): {upstream!r} has no "
+        f"last-good snapshot{fallback_note or '; no fallback edge'}"
     )

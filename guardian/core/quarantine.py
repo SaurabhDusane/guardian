@@ -28,9 +28,15 @@ class QuarantineEntry:
 
 
 def rows_to_payloads(df: pd.DataFrame) -> list[str]:
-    """Serialize each row of ``df`` as a JSON object string (NaN -> null, ISO dates)."""
-    if df.empty:
+    """Serialize each row of ``df`` as a JSON object string (NaN -> null, ISO dates).
+
+    Always returns exactly one payload per row, including for a frame that has rows but
+    no columns (``df.empty`` is True for it), whose rows serialize as ``{}``.
+    """
+    if len(df) == 0:
         return []
+    if len(df.columns) == 0:
+        return ["{}"] * len(df)
     records = json.loads(df.to_json(orient="records", date_format="iso", date_unit="us"))
     return [json.dumps(r, sort_keys=True) for r in records]
 
