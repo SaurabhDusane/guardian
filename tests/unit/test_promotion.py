@@ -281,3 +281,18 @@ def test_worst_quality_order() -> None:
     assert Quality.worst([]) is Quality.FRESH
     assert Quality.worst(["FRESH", "STALE"]) is Quality.STALE
     assert Quality.worst(["STALE", "FALLBACK", "FRESH"]) is Quality.FALLBACK
+
+
+def test_long_lived_guardian_sees_promotions_made_elsewhere(tmp_path) -> None:
+    """A Guardian kept across runs (e.g. a Dagster resource) must not cache versions."""
+    with (
+        Guardian(make_spec(), tmp_path, registry=dict(REGISTRY)) as long_lived,
+        Guardian(make_spec(), tmp_path, registry=dict(REGISTRY)) as cli,
+    ):
+        run(long_lived, "r0")
+        cli.shadow_start("b", "v2")
+        run(long_lived, "r1")  # the long-lived instance runs the candidate started elsewhere
+        cli.promote("b", approve=True)
+        report = run(long_lived, "r2")
+        assert report.get("b").version == "v2"
+        assert long_lived.snapshots.read_provenance("b", "r2")["version"] == "v2"

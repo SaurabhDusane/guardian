@@ -13,7 +13,12 @@ from typing import Any
 
 import dagster as dg
 
-from guardian.adapters.dagster.checks import check_result, check_spec
+from guardian.adapters.dagster.checks import (
+    check_result,
+    check_spec,
+    shadow_check_result,
+    shadow_check_spec,
+)
 from guardian.adapters.dagster.io_manager import (
     BLOCK_METADATA_KEY,
     GuardianIOManager,
@@ -40,15 +45,21 @@ def _block_asset(block: BlockSpec) -> dg.AssetsDefinition:
         # Fallback sources are ordering-only dependencies: they must be materialized
         # before this block in case its input has to be rerouted to them.
         deps=fallback_sources,
-        check_specs=[check_spec(block.name)],
+        check_specs=[check_spec(block.name)]
+        + ([shadow_check_spec(block.name)] if block.versions else []),
         required_resource_keys={"guardian"},
         description=f"Guardian block {block.name} ({block.fn})",
     )
     def _asset(context: dg.AssetExecutionContext, **inputs: Any):
         guardian: Guardian = context.resources.guardian
-        result = guardian.compute(block.name, [inputs[name] for name in block.inputs])
-        yield dg.Output(result)  # GuardianIOManager.handle_output runs here
-        yield check_result(guardian, block.name, guardian_run_id(context.run), result)
+        run_id = guardian_run_id(context.run)
+        frames = [inputs[name] for name in block.inputs]
+        result = guardian.begin_block(block.name, run_id, frames)
+        # handle_output runs here: live decision, then the shadow candidate (core)
+        yield dg.Output(result)
+        yield check_result(guardian, block.name, run_id, result)
+        if block.versions:
+            yield shadow_check_result(guardian, block.name, run_id)
 
     return _asset
 

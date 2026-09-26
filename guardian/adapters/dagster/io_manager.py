@@ -16,6 +16,7 @@ import dagster as dg
 
 from guardian.core.guardian import Guardian
 from guardian.core.models import BlockSkipped, NoSafeInputError
+from guardian.core.shadow import ShadowRun
 
 RUN_ID_TAG = "guardian/run_id"
 BLOCK_METADATA_KEY = "guardian_block"
@@ -30,6 +31,24 @@ def block_name(asset_key: dg.AssetKey) -> str:
     return asset_key.to_user_string()
 
 
+def shadow_metadata(run: ShadowRun) -> dict[str, Any]:
+    """A shadow comparison as flat Dagster metadata (prefixed ``shadow_``)."""
+    c = run.comparison
+    return {
+        "shadow_version": run.version,
+        "shadow_mode": run.mode.value,
+        "shadow_within_tolerance": run.within_tolerance,
+        "shadow_pass_rate": float(run.pass_rate),
+        "shadow_rows": run.rows_passed,
+        "shadow_added": c.added if c else -1,
+        "shadow_removed": c.removed if c else -1,
+        "shadow_changed": c.changed if c else -1,
+        "shadow_changed_fraction": float(c.changed_fraction) if c else -1.0,
+        "shadow_changed_columns": ", ".join(c.changed_columns) if c else "",
+        "shadow_notes": "; ".join(run.notes),
+    }
+
+
 class GuardianIOManager(dg.IOManager):
     def __init__(self, guardian: Guardian) -> None:
         self.guardian = guardian
@@ -37,17 +56,24 @@ class GuardianIOManager(dg.IOManager):
     def handle_output(self, context: dg.OutputContext, obj: Any) -> None:
         block = block_name(context.asset_key)
         run_id = guardian_run_id(context.step_context.dagster_run)
-        decision = self.guardian.handle_result(block, run_id, obj)
+        # Live result, then the shadow candidate on the same inputs, in this
+        # materialization; all of it is core logic.
+        version = self.guardian.active_version(block)  # before any auto-promotion
+        decision, shadow = self.guardian.complete_block(block, run_id, obj)
+        metadata: dict[str, Any] = {"guardian_run_id": run_id}
         if decision is not None:
-            context.add_output_metadata(
+            metadata.update(
                 {
                     "guardian_action": decision.action.value,
-                    "guardian_run_id": run_id,
+                    "guardian_version": version or "-",
                     "rows_total": decision.total_rows,
                     "rows_promoted": decision.good_rows if decision.action.value == "PASS" else 0,
                     "rows_bad": decision.bad_rows,
                 }
             )
+        if shadow is not None:
+            metadata.update(shadow_metadata(shadow))
+        context.add_output_metadata(metadata)
 
     def load_input(self, context: dg.InputContext) -> Any:
         upstream = block_name(context.asset_key)

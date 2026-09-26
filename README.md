@@ -23,7 +23,7 @@ flowchart LR
 
     subgraph core["guardian.core (never imports dagster)"]
         direction TB
-        facade["Guardian facade<br/>compute · on_output · on_crash<br/>resolve_input · replay · set_block_status"]
+        facade["Guardian facade<br/>begin/complete_block · on_output · on_crash<br/>resolve_input · replay · set_block_status<br/>shadow · promote · rollback"]
         validation["validation<br/>Pandera: good / bad rows"]
         planner["planner<br/>which snapshot to read"]
         facade --> validation
@@ -36,6 +36,8 @@ flowchart LR
         quar[("quarantine.duckdb<br/>QUARANTINED / REPLAYED")]
         events[("events.jsonl + events.duckdb<br/>sampled structured events")]
         status[("block_status.json<br/>HEALTHY / DEGRADED / OUT")]
+        versions[("versions.duckdb + shadow.duckdb<br/>active versions, promotions,<br/>shadow comparisons")]
+        cands[("candidates/<br/>shadow outputs (never read<br/>by consumers)")]
     end
 
     spec --> standalone
@@ -46,13 +48,15 @@ flowchart LR
     facade --> quar
     facade --> events
     facade --> status
+    facade --> versions
+    facade --> cands
 ```
 
 | Layer | Modules | Responsibility |
 |---|---|---|
-| Core | `guardian/core/` | Models, validation, snapshot and quarantine stores, event log, reroute planner, `Guardian` facade. All repair semantics live here. |
+| Core | `guardian/core/` | Models, validation, snapshot and quarantine stores, event log, reroute planner, version registry (`versions.py`), shadow comparison and policy (`shadow.py`), `Guardian` facade. All repair and promotion semantics live here. |
 | Standalone adapter | `guardian/runner/` | YAML → `PipelineSpec` (DAG checks), topological executor, `guardian` CLI. |
-| Dagster adapter | `guardian/adapters/dagster/` | IO manager (`handle_output` → core, `load_input` → `resolve_input`), `guardian_validation` asset checks, `guardian_replay` job, `Definitions` built from the same YAML. |
+| Dagster adapter | `guardian/adapters/dagster/` | IO manager (`handle_output` → core, `load_input` → `resolve_input`), `guardian_validation` and `guardian_shadow` asset checks, `guardian_replay` job, `Definitions` built from the same YAML. |
 | Demo | `guardian/demo/` | Messy synthetic orders behind a `DatasetLoader` interface, blocks b1–b8 (every DAG role is represented), schemas, fault injection. |
 
 ## Quickstart
@@ -69,6 +73,8 @@ uv run guardian set-status b6_enrich OUT       # take a block out for optimizati
 uv run guardian run demo/pipeline.yaml         # b8 now reads b5 through the fallback adapter
 uv run guardian set-status b6_enrich HEALTHY
 uv run guardian replay b2_parse                # re-run a (fixed) block on its quarantine
+uv run guardian shadow start b6_enrich v2      # shadow a new version of any block
+uv run guardian shadow status                  # ...then promote / rollback / stop
 uv run pytest                                  # unit tests + scenario suite
 ```
 
@@ -173,8 +179,8 @@ Every resolution emits a `RESOLVE` or `REROUTE` event naming the source actually
   skipped and its consumers reroute. `DEGRADED` is only ever set by Guardian.
 
 **Events.** Structured JSON events go to `events.jsonl` and a DuckDB table. Routine
-events are sampled at `--sample-rate`, while `WARN`, `ERROR`, `ROLLBACK`, `REROUTE` and
-`QUARANTINE` are always kept.
+events are sampled at `--sample-rate`, while `PROMOTION`, `WARN`, `ERROR`, `ROLLBACK`,
+`REROUTE` and `QUARANTINE` are always kept.
 
 ## Walkthrough: heavy corruption in one block (scenario 3)
 
@@ -264,22 +270,23 @@ The event log records why:
 ```
 
 **3. Status.** b6 is `DEGRADED`, still serving r1, with 443 rows waiting in quarantine.
+The `version` and `shadow` columns come into play in [Shadow promotion](#shadow-promotion).
 (The counts for b1–b4 add up over both runs.)
 
 ```
 $ guardian status
-┏━━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━┓
-┃ block          ┃ status   ┃ last-good run ┃ quarantined ┃ replayed ┃
-┡━━━━━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━┩
-│ b1_ingest      │ HEALTHY  │ r2            │ 4           │ 0        │
-│ b2_parse       │ HEALTHY  │ r2            │ 46          │ 0        │
-│ b3_standardize │ HEALTHY  │ r2            │ 26          │ 0        │
-│ b4_clean       │ HEALTHY  │ r2            │ 38          │ 0        │
-│ b5_normalize   │ HEALTHY  │ r2            │ 0           │ 0        │
-│ b6_enrich      │ DEGRADED │ r1            │ 443         │ 0        │
-│ b7_customers   │ HEALTHY  │ r2            │ 0           │ 0        │
-│ b8_aggregate   │ HEALTHY  │ r2            │ 0           │ 0        │
-└────────────────┴──────────┴───────────────┴─────────────┴──────────┘
+┏━━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━┓
+┃ block          ┃ status   ┃ version ┃ shadow ┃ last-good run ┃ quarantined ┃ replayed ┃
+┡━━━━━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━┩
+│ b1_ingest      │ HEALTHY  │ v1      │ -      │ r2            │ 4           │ 0        │
+│ b2_parse       │ HEALTHY  │ v1      │ -      │ r2            │ 46          │ 0        │
+│ b3_standardize │ HEALTHY  │ -       │ -      │ r2            │ 26          │ 0        │
+│ b4_clean       │ HEALTHY  │ -       │ -      │ r2            │ 38          │ 0        │
+│ b5_normalize   │ HEALTHY  │ v1      │ -      │ r2            │ 0           │ 0        │
+│ b6_enrich      │ DEGRADED │ v1      │ -      │ r1            │ 443         │ 0        │
+│ b7_customers   │ HEALTHY  │ v1      │ -      │ r2            │ 0           │ 0        │
+│ b8_aggregate   │ HEALTHY  │ -       │ -      │ r2            │ 0           │ 0        │
+└────────────────┴──────────┴─────────┴────────┴───────────────┴─────────────┴──────────┘
 ```
 
 **4. Fix and replay.** The fault was only for that run, so the "fixed" b6 is simply the
@@ -291,13 +298,13 @@ recovered row replaces its r1 version, and the new snapshot has 443 rows with un
 
 ```
 $ guardian replay b6_enrich
-b6_enrich: replayed 443, still failing 0, upserted into new last-good snapshot replay-20260926T044256-18041e
+b6_enrich: replayed 443, still failing 0, upserted into new last-good snapshot replay-20260926T055359-f98e54
 
 $ guardian replay b6_enrich
 b6_enrich: replayed 0, still failing 0 (nothing to replay)
 
 $ guardian status
-│ b6_enrich      │ HEALTHY │ replay-20260926T044256-18041e │ 0           │ 443      │
+│ b6_enrich      │ HEALTHY │ v1      │ -      │ replay-20260926T055359-f98e54 │ 0           │ 443      │
 ```
 
 b6 is `HEALTHY` again, with a new promoted snapshot. Its 443 records are still in
@@ -315,7 +322,7 @@ $ guardian run demo/pipeline.yaml --run-id r3 --only b8_aggregate
 ┏━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━┓
 ┃ block        ┃ outcome ┃ status  ┃ rows in ┃ promoted ┃ quarantined ┃ read from                               ┃ note ┃
 ┡━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━┩
-│ b8_aggregate │ PASS    │ HEALTHY │     443 │      130 │           0 │ b6_enrich@replay-20260926T044256-18041e │      │
+│ b8_aggregate │ PASS    │ HEALTHY │     443 │      130 │           0 │ b6_enrich@replay-20260926T055359-f98e54 │      │
 └──────────────┴─────────┴─────────┴─────────┴──────────┴─────────────┴─────────────────────────────────────────┴──────┘
 run r3: 1 blocks, 0 rows quarantined. Storage: .guardian
 ```
@@ -365,6 +372,175 @@ b2 is `DEGRADED` and nothing was quarantined, because a crash produces no rows. 
 is fixed (here: the next run without the fault), it passes, returns to `HEALTHY`, and b3
 reads it fresh again. `guardian replay b2_parse` works the same way as for b6 whenever b2
 has quarantined rows.
+
+## Shadow promotion
+
+Any block can have several implementations. A new one runs **in shadow** next to the
+live one on real data, and is promoted only when it has proven itself. Nothing in Guardian
+is specific to a block: every command takes the block name, and scenarios 7a–7g run
+against one block of every DAG role, under both runners
+([`tests/scenarios/test_shadow.py`](tests/scenarios/test_shadow.py)).
+
+```yaml
+  - name: b6_enrich
+    versions:
+      v1: demo.blocks:enrich        # live
+      v2: demo.blocks:enrich_v2     # candidate: handles " c0042"-style ids too
+      v_bad: demo.blocks:enrich_bad # an off-by-one in the VIP rule
+    active: v1
+    merge_key: [order_id]           # needed to diff and to replay
+    shadow:                         # optional; these are the defaults
+      required_runs: 3
+      max_changed_fraction: 0.01
+      # min_pass_rate: 1 - quarantine_threshold
+```
+
+A source block also declares `load:` (b1 does): the loader runs once per run and every
+version receives the same loaded frame.
+
+**How it works**
+
+- **Candidates run on live inputs.** `guardian shadow start <block> <version>` registers
+  a candidate. On every run it is executed on the same resolved live inputs as the
+  active version, even when the block is `OUT`, and even if an upstream block has its
+  own candidate: candidates never read each other.
+- **Consumers never see candidates.** A candidate's output goes to a separate candidate
+  store (`.guardian/candidates/<version>/…`) that `resolve_input` never reads.
+- **Every run is compared.**
+  - *Parity mode* (the live version passed on this run): a row-level diff against the
+    live output on `merge_key`, counting added, removed and changed rows and naming the
+    changed columns, plus per-column stats (null rate, mean, distinct count).
+  - *Absolute mode* (the live version is `DEGRADED` or `OUT`, so there is no trustworthy
+    baseline): the candidate's validation pass rate plus stats.
+- **Promotion policy.** A candidate auto-promotes only after `required_runs` consecutive
+  parity runs within tolerance. Absolute mode, or `shadow start --expect-diff` (an
+  intended behaviour change), needs `guardian shadow promote <block> --approve`.
+  Approval never promotes a candidate that fails `min_pass_rate` on its latest run.
+- **Promoting** makes the new version active in the version registry, which overrides
+  the spec's `active`. It also marks the block `HEALTHY`, so its dependents go back to
+  their normal edges, and replays its quarantine through the new version (idempotent
+  via `merge_key`).
+- **Crash-safe.** A promotion is recorded as `PROMOTING` first, and completes only at
+  the end. If it is interrupted, the old version stays live, `guardian status` shows
+  `PROMOTING`, and running `guardian shadow promote <block>` again resumes it.
+- **Reversible.** `guardian shadow rollback <block>` makes the previous version active
+  again. Snapshots are immutable, so no data is rewritten.
+- **Provenance.** Every snapshot records its version and where each input came from,
+  with a quality of `FRESH`, `STALE` or `FALLBACK`. The worst input quality propagates
+  downstream.
+
+### Example: b6_enrich
+
+A subtly wrong candidate is caught on its first run, and the live output is untouched:
+
+```
+$ guardian shadow start b6_enrich v_bad
+b6_enrich: shadowing v_bad next to live v1
+
+$ guardian run demo/pipeline.yaml --run-id r2
+
+$ guardian shadow status b6_enrich
+      b6_enrich: candidate v_bad vs live v1 (max changed 1.00%, min pass rate 90.00%, 3 runs to auto-promote)
+┏━━━━━┳━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━┓
+┃ run ┃ mode   ┃ live rows ┃ cand. rows ┃ added ┃ removed ┃ changed ┃ changed % ┃ changed columns ┃ pass rate ┃ ok ┃
+┡━━━━━╇━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━┩
+│ r2  │ PARITY │       443 │        443 │     0 │       0 │     184 │    41.53% │ segment         │   100.00% │ no │
+└─────┴────────┴───────────┴────────────┴───────┴─────────┴─────────┴───────────┴─────────────────┴───────────┴────┘
+
+$ guardian shadow promote b6_enrich
+promoting 'b6_enrich' to 'v_bad' needs approval: it has 0 consecutive parity run(s) within tolerance; 3 are required; latest run: changed fraction 0.4153 > max_changed_fraction 0.01 (columns: segment). Use `guardian shadow promote b6_enrich --approve`.
+
+$ guardian shadow stop b6_enrich
+b6_enrich: stopped shadowing v_bad
+```
+
+The genuine improvement matches the live output exactly (0 changed rows) and
+auto-promotes after its third run:
+
+```
+$ guardian shadow start b6_enrich v2
+b6_enrich: shadowing v2 next to live v1
+
+$ guardian run demo/pipeline.yaml --run-id r3
+$ guardian run demo/pipeline.yaml --run-id r4
+$ guardian shadow status
+                            Pipeline 'demo' - blocks in shadow
+┏━━━━━━━━━━━┳━━━━━━┳━━━━━━━━━━━┳━━━━━━┳━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ block     ┃ live ┃ candidate ┃ runs ┃ last mode ┃ streak ┃ promotion                   ┃
+┡━━━━━━━━━━━╇━━━━━━╇━━━━━━━━━━━╇━━━━━━╇━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ b6_enrich │ v1   │ v2        │ 2    │ PARITY    │ 2/3    │ auto after 3 ok parity runs │
+└───────────┴──────┴───────────┴──────┴───────────┴────────┴─────────────────────────────┘
+
+$ guardian run demo/pipeline.yaml --run-id r5
+
+$ guardian status
+┏━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━┓
+┃ block          ┃ status  ┃ version       ┃ shadow ┃ last-good run ┃ quarantined ┃ replayed ┃
+┡━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━┩
+│ b1_ingest      │ HEALTHY │ v1            │ -      │ r5            │ 10          │ 0        │
+│ b2_parse       │ HEALTHY │ v1            │ -      │ r5            │ 115         │ 0        │
+│ b3_standardize │ HEALTHY │ -             │ -      │ r5            │ 65          │ 0        │
+│ b4_clean       │ HEALTHY │ -             │ -      │ r5            │ 95          │ 0        │
+│ b5_normalize   │ HEALTHY │ v1            │ -      │ r5            │ 0           │ 0        │
+│ b6_enrich      │ HEALTHY │ v2 (spec: v1) │ -      │ r5            │ 0           │ 0        │
+│ b7_customers   │ HEALTHY │ v1            │ -      │ r5            │ 0           │ 0        │
+│ b8_aggregate   │ HEALTHY │ -             │ -      │ r5            │ 0           │ 0        │
+└────────────────┴─────────┴───────────────┴────────┴───────────────┴─────────────┴──────────┘
+
+$ guardian shadow rollback b6_enrich
+b6_enrich: rolled back v2 -> v1; last-good is r5
+```
+
+The event log has the audit trail. `PROMOTION` events are never sampled out:
+`PROMOTE PROMOTING auto v1→v2`, `PROMOTE COMPLETED auto v1→v2`, then
+`ROLLBACK COMPLETED v2→v1`.
+
+### The same on another block: an OUT block in absolute mode
+
+With the live version out of service there is no baseline, so the candidate is judged
+on its own pass rate, and promotion needs an explicit approval. Promoting brings the
+block back to `HEALTHY` and b3 off its stale read:
+
+```
+$ guardian set-status b2_parse OUT
+$ guardian shadow start b2_parse v2
+$ guardian run demo/pipeline.yaml --run-id r6
+│ b2_parse       │ SKIPPED │ OUT     │       0 │        0 │           0 │ b1_ingest           │ taken out (status OUT) │
+│ b3_standardize │ PASS    │ HEALTHY │     475 │      462 │          13 │ b2_parse@r5 (stale) │                        │
+
+$ guardian shadow status b2_parse
+┃ run ┃ mode     ┃ live rows ┃ cand. rows ┃ added ┃ removed ┃ changed ┃ changed % ┃ changed columns ┃ pass rate ┃ ok  ┃
+│ r6  │ ABSOLUTE │         - │        475 │     - │       - │       - │         - │ -               │    95.38% │ yes │
+
+$ guardian shadow promote b2_parse
+promoting 'b2_parse' to 'v2' needs approval: the active version is not healthy, so there is no baseline (absolute mode). Use `guardian shadow promote b2_parse --approve`.
+
+$ guardian shadow promote b2_parse --approve
+b2_parse: promoted v1 -> v2 (approved); replayed 0 quarantined record(s) through v2, still failing 115; b2_parse is HEALTHY
+
+$ guardian run demo/pipeline.yaml --run-id r7
+│ b2_parse       │ PASS    │ HEALTHY │     498 │      475 │          23 │ b1_ingest      │      │
+│ b3_standardize │ PASS    │ HEALTHY │     475 │      462 │          13 │ b2_parse       │      │
+```
+
+(The 115 records that still fail are b2's genuinely unparseable rows from earlier runs,
+such as `"not a date"`; v2 recovers only day-first dates and epoch timestamps, and the
+demo data has none of those.)
+
+### In Dagster
+
+The candidate runs inside the same asset materialization as the live version: the asset
+body prepares the inputs through core, and `GuardianIOManager.handle_output` calls
+`Guardian.complete_block`, which records the live decision and then runs the shadow
+comparison. The comparison appears in two places:
+
+- **Materialization metadata** (`shadow_version`, `shadow_mode`,
+  `shadow_changed_fraction`, `shadow_changed_columns`, `shadow_pass_rate`, …).
+- **A `guardian_shadow` asset check** on every versioned block. It fails with severity
+  WARN when the candidate is out of tolerance; a bad candidate never affects live data.
+
+Promotion, rollback and approval are human actions that go through the core or the CLI,
+and a promotion completed from the CLI takes effect on the next Dagster run.
 
 ## Design decisions
 
@@ -508,7 +684,8 @@ with the min to max range. Full details, machine specs and raw samples are in
 
 ```
 guardian/
-  core/        models, validation, snapshots, quarantine, events, planner, guardian facade
+  core/        models, validation, snapshots, quarantine, events, planner, versions,
+               shadow, guardian facade
   runner/      spec_loader, executor, cli
   adapters/dagster/  io_manager, checks, replay, definitions
   demo/        data_gen, schemas, blocks, faults, pipeline.yaml

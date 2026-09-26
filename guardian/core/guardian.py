@@ -152,6 +152,10 @@ class Guardian:
         # only through this instance's own shadow/promotion calls during a run).
         self._active_cache: dict[str, str | None] = {}
         self._shadow_cache: dict[str, Shadow | None] = {}
+        # Inputs staged by begin_block for complete_block (same process, same step), and
+        # each block's shadow comparison per run, for adapters to report.
+        self._staged: dict[tuple[str, str], Any] = {}
+        self.shadow_results: dict[tuple[str, str], ShadowRun | None] = {}
 
     # ------------------------------------------------------------------ plumbing
 
@@ -323,6 +327,39 @@ class Guardian:
             raise TypeError(f"unexpected result for block {block!r}: {type(result).__name__}")
         self.decisions[(block, run_id)] = decision
         return decision
+
+    def begin_block(self, block: str, run_id: str, frames: Sequence[Any] = ()) -> Any:
+        """First half of executing a block on a run; every runner/adapter calls it.
+
+        Prepares the inputs every version runs on (loading a source block's data once),
+        stages them for ``complete_block`` and returns the live version's ``compute``
+        result. A block that is OUT with no candidate in shadow loads nothing.
+        """
+        # Re-read this block's version and shadow state: another process (the CLI) may
+        # have promoted, rolled back or started a shadow since this Guardian was built.
+        self._forget_versions(block)
+        runs_anything = self.skip_reason(block) is None or self.shadow_candidate(block) is not None
+        blocked = any(isinstance(f, BlockSkipped) for f in frames)
+        inputs = (
+            self.prepare_inputs(block, frames) if runs_anything and not blocked else list(frames)
+        )
+        self._staged[(block, run_id)] = inputs
+        return self.compute(block, inputs)
+
+    def complete_block(
+        self, block: str, run_id: str, result: Any, inputs: Any = None
+    ) -> tuple[Decision | None, ShadowRun | None]:
+        """Second half: handle the live result, then run the shadow candidate (if any)
+        on the same inputs. Auto-promotion may happen here.
+
+        ``inputs`` defaults to what ``begin_block`` staged for (block, run_id).
+        """
+        staged = self._staged.pop((block, run_id), None)
+        inputs = staged if inputs is None else inputs
+        decision = self.handle_result(block, run_id, result)
+        shadow = None if inputs is None else self.run_shadow(block, run_id, inputs, decision)
+        self.shadow_results[(block, run_id)] = shadow
+        return decision, shadow
 
     def run_block(self, block: str, run_id: str, inputs: Sequence[pd.DataFrame] = ()) -> Decision:
         """Call the block's function on ``inputs`` and hand the result to on_output.

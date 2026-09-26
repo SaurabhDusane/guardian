@@ -125,9 +125,10 @@ class Executor:
                 seconds=time.perf_counter() - started,
             )
 
-        inputs = g.prepare_inputs(block, frames)  # same inputs for live and candidate
-        if skip is not None:
-            shadow = g.run_shadow(block, run_id, inputs, None)
+        result = g.begin_block(block, run_id, frames)  # same inputs for live and candidate
+        version = g.active_version(block)  # what ran (complete_block may auto-promote)
+        decision, shadow = g.complete_block(block, run_id, result)
+        if decision is None:  # OUT, but its shadow candidate ran
             return BlockReport(
                 block,
                 Outcome.SKIPPED,
@@ -137,10 +138,6 @@ class Executor:
                 seconds=time.perf_counter() - started,
                 shadow=shadow,
             )
-        version = g.active_version(block)
-        decision = g.handle_result(block, run_id, g.compute(block, inputs))
-        assert decision is not None  # not skipped: checked above, inputs all resolved
-        shadow = g.run_shadow(block, run_id, inputs, decision)
         passed = decision.action is Action.PASS
         report = BlockReport(
             block=block,

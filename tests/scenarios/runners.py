@@ -261,10 +261,14 @@ class DagsterRunner(ScenarioRunner):
 
         selection = None if only is None else [dg.AssetKey(b) for b in only]
         result = self._execute(PIPELINE_JOB, tags={RUN_ID_TAG: run_id}, asset_selection=selection)
+        from guardian.adapters.dagster.checks import CHECK_NAME
+
         outcomes = {
             ev.asset_key.to_user_string(): ev.metadata["outcome"].value
             for ev in result.get_asset_check_evaluations()
+            if ev.check_name == CHECK_NAME
         }
+        self.last_result = result  # for tests that inspect Dagster metadata
         resolved = self.events(EventKind.RESOLVE, run_id=run_id) + self.events(
             EventKind.REROUTE, run_id=run_id
         )

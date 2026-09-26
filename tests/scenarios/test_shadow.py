@@ -2,10 +2,9 @@
 
 Each role's representative block declares ``v1`` (active), ``v2`` (an improvement that
 is identical on well-formed data) and ``v_bad`` (an off-by-one). Nothing here names a
-block: blocks come from their role, expectations from the spec.
+block: blocks come from their role, expectations from the spec. Every scenario runs
+under both runners (the ``runner`` fixture in conftest.py).
 """
-
-from collections.abc import Iterator
 
 import pandas as pd
 import pytest
@@ -17,7 +16,6 @@ from guardian.core.shadow import ShadowMode
 from guardian.core.versions import PromotionKind, PromotionState
 
 from ..helpers.roles import ancestors, dependents, descendants, representative
-from .runners import ScenarioRunner, StandaloneRunner, scenario_spec
 from .test_scenarios import (
     PROFILES,
     ROLES,
@@ -28,15 +26,6 @@ from .test_scenarios import (
 )
 
 by_role = pytest.mark.parametrize("role", ROLES)
-
-
-# Phase 7 Part 1 runs these on the standalone runner; Part 2 adds the Dagster adapter
-# and the Dagster runner here.
-@pytest.fixture(params=[pytest.param(StandaloneRunner, id="standalone")])
-def runner(request, tmp_path) -> Iterator[ScenarioRunner]:
-    instance = request.param(scenario_spec(), tmp_path / "guardian")
-    yield instance
-    instance.close()
 
 
 def versioned(role: str) -> str:
