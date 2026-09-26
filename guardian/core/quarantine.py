@@ -163,15 +163,26 @@ class DuckDBQuarantineStore:
             )
         with self._connect() as con:
             con.execute("BEGIN TRANSACTION")
-            ids = []
-            for row in rows:
-                (new_id,) = con.execute(
-                    "INSERT INTO quarantine "
-                    "(block, run_id, rule_name, reason, ts, status, payload_json) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
-                    row,
-                ).fetchone()
-                ids.append(int(new_id))
+            # Reserve ids up front and insert everything in one statement: a per-row
+            # INSERT costs ~1ms each, which dominated runs with many quarantined rows.
+            # Ids are assigned in entry order, so a higher id is always a newer record.
+            reserved = con.execute(
+                "SELECT nextval('quarantine_id_seq') FROM range(?)", [len(rows)]
+            ).fetchall()
+            ids = sorted(int(r[0]) for r in reserved)
+            batch = pd.DataFrame(
+                rows,
+                columns=["block", "run_id", "rule_name", "reason", "ts", "status", "payload_json"],
+            )
+            batch.insert(0, "id", ids)
+            con.register("_quarantine_batch", batch)
+            con.execute(
+                "INSERT INTO quarantine "
+                "(id, block, run_id, rule_name, reason, ts, status, payload_json) "
+                "SELECT id, block, run_id, rule_name, reason, ts, status, payload_json "
+                "FROM _quarantine_batch ORDER BY id"
+            )
+            con.unregister("_quarantine_batch")
             con.execute("COMMIT")
         return ids
 
@@ -221,19 +232,21 @@ class DuckDBQuarantineStore:
         if not id_list:
             return 0
         validate_name(replay_run_id, "run_id")
-        placeholders = ", ".join("?" for _ in id_list)
         with self._connect() as con:
+            # Join against a registered frame instead of an IN list with one
+            # placeholder per id (replays can mark ~100k records at once).
+            con.register("_replayed_ids", pd.DataFrame({"id": id_list}, dtype="int64"))
             changed = con.execute(
                 "UPDATE quarantine SET status = ?, replayed_at = ?, replay_run_id = ? "
-                f"WHERE status = ? AND id IN ({placeholders}) RETURNING id",
+                "WHERE status = ? AND id IN (SELECT id FROM _replayed_ids) RETURNING id",
                 [
                     QuarantineStatus.REPLAYED.value,
                     _to_utc_naive(datetime.now(UTC)),
                     replay_run_id,
                     QuarantineStatus.QUARANTINED.value,
-                    *id_list,
                 ],
             ).fetchall()
+            con.unregister("_replayed_ids")
         return len(changed)
 
     @staticmethod

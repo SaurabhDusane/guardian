@@ -398,13 +398,27 @@ The invariant is tested at three levels:
 
 ## Results
 
-> TODO: fill in from benchmark runs.
+Demo pipeline at 100,000 generated rows, 5 runs per configuration, on a 4-core Intel Xeon
+@ 2.10 GHz cloud container (Python 3.11, pandas 3.0, DuckDB 1.5). The figures are medians
+with the min to max range. Full details, machine specs and raw samples are in
+[`bench/results.md`](bench/results.md); reproduce with `uv run python bench/run_bench.py`
+(`--rows`, `--reps`).
 
 | Metric | Setup | Result |
 |---|---|---|
-| Throughput during outage | TODO: rows/s through b8 while b6 is DEGRADED (fallback path) vs. healthy baseline | TODO |
-| Recovery time | TODO: time from fix to b6 HEALTHY (replay duration vs. quarantine size) | TODO |
-| Logging overhead | TODO: run time at `--sample-rate` 1.0 vs. 0.1 vs. 0.0, relative to no Guardian | TODO |
+| Throughput during outage | Rows/s through the whole pipeline while b6 crashes on every run and b8 is rerouted to b5, vs. a clean run. The same 87,517 rows reach b8 in both. | **23,362 rows/s** during the outage (22,322 to 23,648) vs. **22,358 rows/s** clean (22,150 to 22,620): **104%** of the clean run. There is no throughput penalty; b6's own work is skipped. |
+| Recovery time | Time for `replay b6_enrich` after a heavy-corruption outage (87,517 quarantined rows), until b6 is HEALTHY with the upserted snapshot promoted. | **2.55 s** in-process (2.47 to 2.60). **3.72 s** via the CLI (3.68 to 4.36), which includes starting Python and importing pandas, Pandera, pyarrow and DuckDB. |
+| Logging overhead | The same blocks on clean data, with Guardian at event sample rate 1.0 and 0.1, vs. a bare run without Guardian. | Bare **2.67 s**. Guardian **3.41 s** at 1.0 and **3.41 s** at 0.1, so **+28%** in total (validation, Parquet snapshots, bookkeeping). The logging share (1.0 vs. 0.1) is **+1 ms**, below the ±73 ms run-to-run spread. A run emits only 36 events, per block and decision rather than per row. |
+
+**Reading the numbers**
+- **Outage throughput:** reading b5 through the adapter costs no more than running b6, so
+  the pipeline delivers at full speed during the outage. What degrades is data richness
+  (segments are `unassigned`), not throughput.
+- **Recovery:** replaying about 88k rows is a few seconds, dominated by re-running b6 and
+  validating the recovered rows.
+- **Overhead:** Guardian's cost comes from validation and snapshots, not from logging.
+  At this event volume the sample rate hardly matters; it would start to matter only with
+  far more blocks or with per-row events.
 
 ## Project layout
 
@@ -414,10 +428,13 @@ guardian/
   runner/      spec_loader, executor, cli
   adapters/dagster/  io_manager, checks, replay, definitions
   demo/        data_gen, schemas, blocks, faults, pipeline.yaml
+bench/
+  run_bench.py throughput / recovery / overhead benchmarks -> bench/results.md
 tests/
   unit/        per-module core tests, invariant property test, layering test
   runner/      spec loader, executor, CLI
   demo/        demo blocks and fault injection
   adapters/    Dagster adapter wiring
   scenarios/   fault-injection suite, parametrized over the standalone and Dagster runners
+  bench/       smoke test for the benchmark script
 ```
