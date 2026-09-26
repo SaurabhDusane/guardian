@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 
-from guardian.core.models import BlockSpec, FallbackEdge, PipelineSpec
+from guardian.core.models import BlockSpec, FallbackEdge, PipelineSpec, ShadowPolicy
 
 _PIPELINE_KEYS = {"name", "blocks"}
 _BLOCK_KEYS = {
@@ -20,7 +20,12 @@ _BLOCK_KEYS = {
     "fallbacks",
     "params",
     "merge_key",
+    "versions",
+    "active",
+    "load",
+    "shadow",
 }
+_SHADOW_KEYS = {"required_runs", "max_changed_fraction", "min_pass_rate"}
 _FALLBACK_KEYS = {"replaces", "source", "adapter"}
 
 
@@ -67,9 +72,38 @@ def parse_spec(raw: Any, source: str = "<spec>") -> PipelineSpec:
 
 def _parse_block(raw: Mapping[str, Any], where: str) -> BlockSpec:
     _check_keys(raw, _BLOCK_KEYS, where)
-    for key in ("name", "fn"):
-        if not isinstance(raw.get(key), str) or not raw[key]:
-            raise SpecError(f"{where}: '{key}' is required and must be a string")
+    if not isinstance(raw.get("name"), str) or not raw["name"]:
+        raise SpecError(f"{where}: 'name' is required and must be a string")
+    versions = raw.get("versions") or {}
+    if not isinstance(versions, Mapping) or not all(
+        isinstance(k, str) and isinstance(v, str) and v for k, v in versions.items()
+    ):
+        raise SpecError(f"{where}: 'versions' must map version names to 'module:fn' strings")
+    active = raw.get("active")
+    if versions:
+        if active is None:
+            raise SpecError(f"{where}: 'versions' requires 'active'")
+        if active not in versions:
+            raise SpecError(f"{where}: active version {active!r} is not one of {sorted(versions)}")
+        if raw.get("fn") is not None and raw["fn"] != versions[active]:
+            raise SpecError(
+                f"{where}: 'fn' conflicts with the active version; omit 'fn' when "
+                "declaring 'versions'"
+            )
+        fn = versions[active]
+    else:
+        if active is not None:
+            raise SpecError(f"{where}: 'active' requires 'versions'")
+        fn = raw.get("fn")
+        if not isinstance(fn, str) or not fn:
+            raise SpecError(f"{where}: 'fn' is required and must be a string")
+    load = raw.get("load")
+    if load is not None and not isinstance(load, str):
+        raise SpecError(f"{where}: 'load' must be a 'module:attr' string")
+    shadow_raw = raw.get("shadow") or {}
+    if not isinstance(shadow_raw, Mapping):
+        raise SpecError(f"{where}: 'shadow' must be a mapping")
+    _check_keys(shadow_raw, _SHADOW_KEYS, f"{where} shadow")
     inputs = raw.get("inputs") or []
     if not isinstance(inputs, list) or not all(isinstance(x, str) for x in inputs):
         raise SpecError(f"{where}: 'inputs' must be a list of block names")
@@ -97,13 +131,17 @@ def _parse_block(raw: Mapping[str, Any], where: str) -> BlockSpec:
         )
         return BlockSpec(
             name=raw["name"],
-            fn=raw["fn"],
+            fn=fn,
             inputs=tuple(inputs),
             schema=schema,
             quarantine_threshold=float(threshold),
             fallbacks=fallbacks,
             params=dict(params),
             merge_key=tuple(merge_key) if merge_key is not None else None,
+            versions=dict(versions),
+            active=active,
+            load=load,
+            shadow=ShadowPolicy(**shadow_raw),
         )
     except ValueError as exc:
         if isinstance(exc, SpecError):

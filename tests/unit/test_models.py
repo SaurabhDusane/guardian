@@ -105,3 +105,28 @@ def test_merge_key_validation() -> None:
     for bad in [(), ("a", "a"), ("",)]:
         with pytest.raises(ValueError, match="merge_key"):
             BlockSpec("b", "m:f", merge_key=bad)
+
+
+def test_versions_require_active_and_matching_fn() -> None:
+    b = BlockSpec("b", "m:f", versions={"v1": "m:f", "v2": "m:g"}, active="v1")
+    assert b.version_ref("v2") == "m:g" and b.version_ref(None) == "m:f"
+    with pytest.raises(KeyError, match="no version 'v9'"):
+        b.version_ref("v9")
+    with pytest.raises(ValueError, match="requires 'active'"):
+        BlockSpec("b", "m:f", versions={"v1": "m:f"})
+    with pytest.raises(ValueError, match="not the active version"):
+        BlockSpec("b", "m:x", versions={"v1": "m:f"}, active="v1")
+    with pytest.raises(ValueError, match="invalid version name"):
+        BlockSpec("b", "m:f", versions={"v/1": "m:f"}, active="v/1")
+    plain = BlockSpec("p", "m:f")
+    assert plain.version_ref(None) == "m:f"
+    with pytest.raises(KeyError):
+        plain.version_ref("v2")
+
+
+def test_dataref_read_quality() -> None:
+    from guardian.core.models import Quality
+
+    assert DataRef("a", "r").read_quality is Quality.FRESH
+    assert DataRef("a", "r", requested="a", stale=True).read_quality is Quality.STALE
+    assert DataRef("b", "r", requested="a", adapter="m:f").read_quality is Quality.FALLBACK

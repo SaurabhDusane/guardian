@@ -141,20 +141,31 @@ def inject(fn: Callable[..., pd.DataFrame], *faults: Fault) -> Callable[..., pd.
 
 
 def apply_faults(
-    spec: PipelineSpec, faults: Mapping[str, Sequence[Fault]]
+    spec: PipelineSpec,
+    faults: Mapping[str, Sequence[Fault]],
+    active_versions: Mapping[str, str | None] | None = None,
 ) -> tuple[PipelineSpec, dict[str, Any]]:
     """Return a spec whose faulted blocks call wrapped functions, plus their registry.
 
     Pass both to ``Guardian(spec, root, registry=registry)``. Unfaulted blocks are
-    unchanged, and snapshots/quarantine keep the real block names.
+    unchanged, and snapshots/quarantine keep the real block names. For a block with
+    versions, the fault wraps the live version only (``active_versions[block]``, else
+    the spec's ``active``): a shadow candidate is a different implementation and does
+    not inherit the live version's bug.
     """
     registry: dict[str, Any] = {}
     blocks = []
     for block in spec.blocks:
         if faults.get(block.name):
-            key = f"__faulted__:{block.name}"
-            registry[key] = inject(load_ref(block.fn), *faults[block.name])
-            block = dataclasses.replace(block, fn=key)
+            version = (active_versions or {}).get(block.name) or block.active
+            key = f"__faulted__:{block.name}:{version or 'fn'}"
+            registry[key] = inject(load_ref(block.version_ref(version)), *faults[block.name])
+            if block.versions:
+                versions = {**block.versions, version: key}
+                fn = key if version == block.active else block.fn
+                block = dataclasses.replace(block, versions=versions, fn=fn)
+            else:
+                block = dataclasses.replace(block, fn=key)
         blocks.append(block)
     unknown = set(faults) - set(spec.block_names)
     if unknown:

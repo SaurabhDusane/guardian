@@ -211,7 +211,10 @@ def _bare_run(spec: PipelineSpec) -> int:
     for name in topological_order(spec):
         block = spec.block(name)
         fn = load_ref(block.fn)
-        outputs[name] = fn(*[outputs[u] for u in block.inputs], **block.params)
+        if block.load is not None:  # a source block's loader takes the params
+            outputs[name] = fn(load_ref(block.load)(**block.params))
+        else:
+            outputs[name] = fn(*[outputs[u] for u in block.inputs], **block.params)
     return len(outputs["b1_ingest"])
 
 

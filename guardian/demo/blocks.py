@@ -49,20 +49,43 @@ def _number(series: pd.Series) -> pd.Series:
 # ---------------------------------------------------------------- b1
 
 
-def ingest(
-    replayed: pd.DataFrame | None = None,
-    *,
-    loader: str = DEFAULT_LOADER,
-    **loader_kwargs: Any,
-) -> pd.DataFrame:
-    """b1: load the raw dataset through a DatasetLoader named by ``loader``.
+def load_orders(loader: str = DEFAULT_LOADER, **loader_kwargs: Any) -> pd.DataFrame:
+    """b1's loader: the raw dataset from a DatasetLoader named by ``loader``.
 
-    On replay Guardian passes the quarantined raw rows back in; a source cannot
-    regenerate them, so they are returned unchanged for re-validation.
+    Guardian calls it once per run; every version of b1 receives its frame, so a
+    shadow candidate sees exactly the data the live version saw.
     """
-    if replayed is not None:
-        return replayed.copy()
     return load_ref(loader)(**loader_kwargs).load()
+
+
+def ingest(raw: pd.DataFrame) -> pd.DataFrame:
+    """b1 v1: accept the loaded rows as they are.
+
+    On replay Guardian passes the quarantined raw rows back in; they are returned
+    unchanged for re-validation.
+    """
+    return raw.copy()
+
+
+def ingest_v2(raw: pd.DataFrame) -> pd.DataFrame:
+    """b1 v2: also normalizes order ids exported as ``" 1042"`` or ``"#1042"``.
+
+    Identical to v1 on well-formed ids; recovers rows v1 would reject.
+    """
+    out = raw.copy()
+    present = out["order_id"].notna()
+    ids = out.loc[present, "order_id"].astype(str).str.strip().str.lstrip("#")
+    out.loc[present, "order_id"] = ids
+    return out
+
+
+def ingest_bad(raw: pd.DataFrame) -> pd.DataFrame:
+    """b1 v_bad: an off-by-one when "normalizing" ids shifts every order id by one."""
+    out = raw.copy()
+    ids = pd.to_numeric(out["order_id"], errors="coerce")
+    out["order_id"] = (ids + 1).astype("Int64").astype("string").astype(object)
+    out.loc[ids.isna(), "order_id"] = None
+    return out
 
 
 # ---------------------------------------------------------------- b2
@@ -76,6 +99,29 @@ def parse(df: pd.DataFrame) -> pd.DataFrame:
     )
     out["amount_value"] = _number(out["amount"])
     out["quantity_value"] = _number(out["quantity"])
+    return out
+
+
+def parse_v2(df: pd.DataFrame) -> pd.DataFrame:
+    """b2 v2: as v1, and also parses day-first dates (``31.01.2024``) and epoch seconds.
+
+    Identical to v1 wherever v1 parses a timestamp; recovers some rows v1 rejects.
+    """
+    out = parse(df)
+    missing = out["order_time"].isna()
+    if missing.any():
+        text = _text(out.loc[missing, "order_ts"])
+        epoch = pd.to_numeric(text, errors="coerce")
+        from_epoch = pd.to_datetime(epoch, unit="s", utc=True, errors="coerce")
+        dayfirst = pd.to_datetime(text, format="%d.%m.%Y", utc=True, errors="coerce")
+        out.loc[missing, "order_time"] = from_epoch.fillna(dayfirst)
+    return out
+
+
+def parse_bad(df: pd.DataFrame) -> pd.DataFrame:
+    """b2 v_bad: an off-by-one in the parsed quantity (counts from 1 twice)."""
+    out = parse(df)
+    out["quantity_value"] = out["quantity_value"] + 1
     return out
 
 
@@ -137,6 +183,25 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def normalize_v2(df: pd.DataFrame) -> pd.DataFrame:
+    """b5 v2: as v1, but never divides by a zero quantity (unit price left empty).
+
+    Identical to v1 for every valid row.
+    """
+    out = normalize(df)
+    zero = out["quantity"] == 0
+    if zero.any():
+        out.loc[zero, "unit_price_usd"] = float("nan")
+    return out
+
+
+def normalize_bad(df: pd.DataFrame) -> pd.DataFrame:
+    """b5 v_bad: unit price divides by ``quantity + 1`` (an off-by-one)."""
+    out = normalize(df)
+    out["unit_price_usd"] = (out["amount_usd"] / (out["quantity"] + 1)).round(2)
+    return out
+
+
 # ---------------------------------------------------------------- b6
 
 
@@ -160,6 +225,28 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
     out["region"] = out["country"].map(REGION_BY_COUNTRY)
     out["segment"] = _segment(out["customer_id"])
     out["order_size"] = _order_size(out["amount_usd"])
+    return out
+
+
+def enrich_v2(df: pd.DataFrame) -> pd.DataFrame:
+    """b6 v2: as v1, but segments customer ids written as ``" c0042"`` too.
+
+    Identical to v1 on well-formed ids.
+    """
+    out = df.copy()
+    ids = out["customer_id"].astype("string").str.strip().str.upper()
+    out["region"] = out["country"].map(REGION_BY_COUNTRY)
+    out["segment"] = _segment(ids)
+    out["order_size"] = _order_size(out["amount_usd"])
+    return out
+
+
+def enrich_bad(df: pd.DataFrame) -> pd.DataFrame:
+    """b6 v_bad: VIP customers are ``id % 5 == 1`` instead of ``== 0`` (off-by-one)."""
+    out = enrich(df)
+    numeric = pd.to_numeric(out["customer_id"].astype("string").str[1:], errors="coerce")
+    known = numeric.notna()
+    out.loc[known, "segment"] = np.where(numeric[known] % 5 == 1, "vip", "regular")
     return out
 
 
@@ -224,3 +311,27 @@ def customers(df: pd.DataFrame) -> pd.DataFrame:
     summary["customer_id"] = summary["customer_id"].astype(str)
     summary["revenue_usd"] = summary["revenue_usd"].round(2)
     return summary
+
+
+def customers_v2(df: pd.DataFrame) -> pd.DataFrame:
+    """b7 v2: as v1, but groups customer ids case- and whitespace-insensitively.
+
+    Identical to v1 on well-formed ids.
+    """
+    if "first_order_date" in df.columns:
+        return df.copy()
+    out = df.copy()
+    present = out["customer_id"].notna()
+    out.loc[present, "customer_id"] = (
+        out.loc[present, "customer_id"].astype(str).str.strip().str.upper()
+    )
+    return customers(out)
+
+
+def customers_bad(df: pd.DataFrame) -> pd.DataFrame:
+    """b7 v_bad: counts one order too many per customer (off-by-one)."""
+    out = customers(df)
+    if "first_order_date" in df.columns:
+        return out
+    out["orders"] = out["orders"] + 1
+    return out

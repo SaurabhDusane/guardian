@@ -32,6 +32,11 @@ def descendants(spec: PipelineSpec, block: str) -> list[str]:
     return [b for b in topological_order(spec) if b in found]
 
 
+def ancestors(spec: PipelineSpec, block: str) -> list[str]:
+    """Every block upstream of ``block`` through inputs, in topological order."""
+    return [b for b in topological_order(spec) if block in descendants(spec, b)]
+
+
 def blocks_by_role(spec: PipelineSpec) -> dict[str, list[str]]:
     """Map every role in ROLES to its blocks (topological order; roles may overlap)."""
     fallback_sources = {e.source for b in spec.blocks for e in b.fallbacks}

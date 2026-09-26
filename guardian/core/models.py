@@ -57,6 +57,54 @@ class QuarantineStatus(StrEnum):
     REPLAYED = "REPLAYED"
 
 
+class Quality(StrEnum):
+    """How trustworthy a snapshot's inputs were, from best to worst.
+
+    FRESH: every input was read from this run's (or a healthy) upstream snapshot.
+    STALE: some input was an unhealthy upstream's older last-good snapshot.
+    FALLBACK: some input came through a fallback edge's adapter (approximated data).
+    A snapshot's quality is the worst of its inputs' qualities, which already include
+    the quality of the snapshots they read, so it propagates downstream.
+    """
+
+    FRESH = "FRESH"
+    STALE = "STALE"
+    FALLBACK = "FALLBACK"
+
+    @property
+    def rank(self) -> int:
+        return _QUALITY_ORDER.index(self)
+
+    @classmethod
+    def worst(cls, qualities: Any) -> Quality:
+        return max((cls(q) for q in qualities), key=lambda q: q.rank, default=cls.FRESH)
+
+
+_QUALITY_ORDER = (Quality.FRESH, Quality.STALE, Quality.FALLBACK)
+
+
+@dataclass(frozen=True)
+class ShadowPolicy:
+    """When a shadowed candidate version may be promoted.
+
+    ``min_pass_rate`` defaults to ``1 - quarantine_threshold`` of the block
+    (resolved by ``BlockSpec.shadow_policy``).
+    """
+
+    required_runs: int = 3
+    max_changed_fraction: float = 0.01
+    min_pass_rate: float | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.required_runs, bool) or int(self.required_runs) < 1:
+            raise ValueError(f"shadow.required_runs must be >= 1, got {self.required_runs}")
+        object.__setattr__(self, "required_runs", int(self.required_runs))
+        if not 0.0 <= self.max_changed_fraction <= 1.0:
+            raise ValueError("shadow.max_changed_fraction must be in [0, 1]")
+        if self.min_pass_rate is not None and not 0.0 <= self.min_pass_rate <= 1.0:
+            raise ValueError("shadow.min_pass_rate must be in [0, 1]")
+
+
 @dataclass(frozen=True)
 class FallbackEdge:
     """When ``replaces`` is unavailable, read ``source`` instead and apply ``adapter``."""
@@ -85,9 +133,37 @@ class BlockSpec:
     # Columns identifying a row across runs. Replay upserts recovered rows into the
     # last-good snapshot by this key; without it, replay never merges.
     merge_key: tuple[str, ...] | None = None
+    # Named implementations ("module:fn"); ``fn`` is the one named by ``active``.
+    # Without ``versions`` a block has a single implicit version.
+    versions: Mapping[str, str] = field(default_factory=dict, hash=False)
+    active: str | None = None
+    # Source blocks only: loads the raw data once per run; every version of the block
+    # then receives it as its single input (so candidates see the same loaded data).
+    load: str | None = None
+    shadow: ShadowPolicy = field(default_factory=ShadowPolicy)
 
     def __post_init__(self) -> None:
         validate_name(self.name, "block name")
+        object.__setattr__(self, "versions", MappingProxyType(dict(self.versions)))
+        if self.versions:
+            for version in self.versions:
+                validate_name(version, "version name")
+            if self.active is None:
+                raise ValueError(f"block {self.name!r}: 'versions' requires 'active'")
+            if self.active not in self.versions:
+                raise ValueError(
+                    f"block {self.name!r}: active version {self.active!r} is not one of "
+                    f"{sorted(self.versions)}"
+                )
+            if self.fn != self.versions[self.active]:
+                raise ValueError(
+                    f"block {self.name!r}: fn {self.fn!r} is not the active version's "
+                    f"function {self.versions[self.active]!r}"
+                )
+        elif self.active is not None:
+            raise ValueError(f"block {self.name!r}: 'active' requires 'versions'")
+        if self.load is not None and self.inputs:
+            raise ValueError(f"block {self.name!r}: only source blocks (no inputs) may 'load'")
         object.__setattr__(self, "params", MappingProxyType(dict(self.params)))
         if self.merge_key is not None:
             key = tuple(self.merge_key)
@@ -120,6 +196,25 @@ class BlockSpec:
 
     def fallback_for(self, upstream: str) -> FallbackEdge | None:
         return next((e for e in self.fallbacks if e.replaces == upstream), None)
+
+    def version_ref(self, version: str | None) -> str:
+        """The function reference of ``version`` (None: the spec's active one)."""
+        if version is None or (not self.versions and version == self.active):
+            return self.fn
+        if version not in self.versions:
+            known = sorted(self.versions) or ["(none: block has no versions)"]
+            raise KeyError(f"block {self.name!r} has no version {version!r}; known: {known}")
+        return self.versions[version]
+
+    def shadow_policy(self) -> ShadowPolicy:
+        """The shadow policy with ``min_pass_rate`` resolved against the threshold."""
+        if self.shadow.min_pass_rate is not None:
+            return self.shadow
+        return ShadowPolicy(
+            required_runs=self.shadow.required_runs,
+            max_changed_fraction=self.shadow.max_changed_fraction,
+            min_pass_rate=1.0 - self.quarantine_threshold,
+        )
 
 
 @dataclass(frozen=True)
@@ -166,6 +261,13 @@ class DataRef:
     @property
     def rerouted(self) -> bool:
         return self.requested is not None and self.requested != self.block
+
+    @property
+    def read_quality(self) -> Quality:
+        """Quality of this read alone (the source snapshot's own quality not included)."""
+        if self.rerouted:
+            return Quality.FALLBACK
+        return Quality.STALE if self.stale else Quality.FRESH
 
 
 @dataclass(frozen=True)

@@ -6,13 +6,22 @@
 # crashed) or taken OUT, b8 reads b5_normalize instead, reshaped by b5_to_b6_shape.
 # b7_customers also reads b5_normalize, so b5 feeds two dependents.
 #
+# Versions: one block per DAG role declares v1 (active), v2 (a genuine improvement,
+# identical on well-formed data) and v_bad (subtly wrong: an off-by-one), for shadow
+# promotion (`guardian shadow start <block> <version>`).
+#
 # DAG roles (tests pick blocks by role, see tests/helpers/roles.py):
 #   source: b1   leaf: b7, b8   fallback_protected: b6   fallback_source: b5
 #   multi_dependent: b5   unprotected: b1-b5
 name: demo
 blocks:
   - name: b1_ingest
-    fn: demo.blocks:ingest
+    load: demo.blocks:load_orders  # params go to the loader; versions get its frame
+    versions:
+      v1: demo.blocks:ingest
+      v2: demo.blocks:ingest_v2
+      v_bad: demo.blocks:ingest_bad
+    active: v1
     merge_key: [order_id]
     schema: demo.schemas:RawSchema
     quarantine_threshold: 0.2
@@ -22,7 +31,11 @@ blocks:
       seed: 42
 
   - name: b2_parse
-    fn: demo.blocks:parse
+    versions:
+      v1: demo.blocks:parse
+      v2: demo.blocks:parse_v2
+      v_bad: demo.blocks:parse_bad
+    active: v1
     merge_key: [order_id]
     inputs: [b1_ingest]
     schema: demo.schemas:ParsedSchema
@@ -43,21 +56,33 @@ blocks:
     quarantine_threshold: 0.2
 
   - name: b5_normalize
-    fn: demo.blocks:normalize
+    versions:
+      v1: demo.blocks:normalize
+      v2: demo.blocks:normalize_v2
+      v_bad: demo.blocks:normalize_bad
+    active: v1
     merge_key: [order_id]
     inputs: [b4_clean]
     schema: demo.schemas:NormalizedSchema
     quarantine_threshold: 0.1
 
   - name: b6_enrich
-    fn: demo.blocks:enrich
+    versions:
+      v1: demo.blocks:enrich
+      v2: demo.blocks:enrich_v2
+      v_bad: demo.blocks:enrich_bad
+    active: v1
     merge_key: [order_id]
     inputs: [b5_normalize]
     schema: demo.schemas:EnrichedSchema
     quarantine_threshold: 0.1
 
   - name: b7_customers
-    fn: demo.blocks:customers
+    versions:
+      v1: demo.blocks:customers
+      v2: demo.blocks:customers_v2
+      v_bad: demo.blocks:customers_bad
+    active: v1
     merge_key: [customer_id]
     inputs: [b5_normalize]
     schema: demo.schemas:CustomerSchema

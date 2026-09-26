@@ -148,3 +148,65 @@ def test_roundtrip_from_file(tmp_path) -> None:
     path = tmp_path / "p.yaml"
     path.write_text(yaml.safe_dump(spec({"name": "a", "fn": "m:f"})), encoding="utf-8")
     assert load_spec(path).block_names == ("a",)
+
+
+def test_versions_active_load_and_shadow_policy() -> None:
+    s = parse_spec(
+        spec(
+            {
+                "name": "a",
+                "load": "m:load",
+                "versions": {"v1": "m:f", "v2": "m:g"},
+                "active": "v2",
+                "merge_key": ["id"],
+                "quarantine_threshold": 0.1,
+                "shadow": {"required_runs": 5, "max_changed_fraction": 0.05},
+            },
+            {"name": "b", "fn": "m:f", "inputs": ["a"]},
+        )
+    )
+    a = s.block("a")
+    assert a.fn == "m:g" and a.active == "v2" and dict(a.versions) == {"v1": "m:f", "v2": "m:g"}
+    assert a.load == "m:load"
+    policy = a.shadow_policy()
+    assert (policy.required_runs, policy.max_changed_fraction) == (5, 0.05)
+    assert policy.min_pass_rate == pytest.approx(0.9)  # default: 1 - quarantine_threshold
+    b = s.block("b")
+    assert b.versions == {} and b.active is None and b.shadow.required_runs == 3
+
+
+def test_demo_gives_every_role_a_v2_and_a_v_bad() -> None:
+    from ..helpers.roles import ROLES, blocks_by_role
+
+    demo = load_spec(DEMO_SPEC)
+    roles = blocks_by_role(demo)
+    for role in ROLES:
+        assert any({"v2", "v_bad"} <= set(demo.block(b).versions) for b in roles[role]), role
+
+
+@pytest.mark.parametrize(
+    "block,match",
+    [
+        ({"name": "a", "versions": {"v1": "m:f"}}, "requires 'active'"),
+        ({"name": "a", "versions": {"v1": "m:f"}, "active": "v9"}, "not one of"),
+        ({"name": "a", "fn": "m:x", "versions": {"v1": "m:f"}, "active": "v1"}, "conflicts"),
+        ({"name": "a", "fn": "m:f", "active": "v1"}, "requires 'versions'"),
+        ({"name": "a", "versions": ["m:f"], "active": "v1"}, "'versions' must map"),
+        ({"name": "a", "fn": "m:f", "shadow": {"required_runs": 0}}, "required_runs"),
+        ({"name": "a", "fn": "m:f", "shadow": {"typo": 1}}, "unknown key"),
+        ({"name": "a", "fn": "m:f", "load": 3}, "'load'"),
+    ],
+)
+def test_rejects_bad_version_specs(block, match) -> None:
+    with pytest.raises(SpecError, match=match):
+        parse_spec(spec(block))
+
+
+def test_load_only_on_source_blocks() -> None:
+    with pytest.raises(SpecError, match="only source blocks"):
+        parse_spec(
+            spec(
+                {"name": "a", "fn": "m:f"},
+                {"name": "b", "fn": "m:f", "inputs": ["a"], "load": "m:l"},
+            )
+        )

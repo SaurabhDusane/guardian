@@ -18,7 +18,7 @@ from typing import Any
 import pandas as pd
 
 from guardian.core.events import Event, EventKind
-from guardian.core.guardian import Guardian
+from guardian.core.guardian import Guardian, PromotionResult
 from guardian.core.models import (
     BlockStatus,
     DataRef,
@@ -28,6 +28,8 @@ from guardian.core.models import (
     ReplayResult,
 )
 from guardian.core.refs import load_ref
+from guardian.core.shadow import Shadow, ShadowRun
+from guardian.core.versions import Promotion
 from guardian.demo.faults import Fault, apply_faults
 from guardian.runner.executor import Executor
 from guardian.runner.spec_loader import load_spec
@@ -35,14 +37,23 @@ from guardian.runner.spec_loader import load_spec
 DEMO_SPEC_PATH = Path(load_ref("guardian.demo:__file__")).parent / "pipeline.yaml"
 
 
-def scenario_spec(rows: int = 200) -> PipelineSpec:
-    """The demo spec with clean (error-free) input, so every quarantine is a fault."""
+def scenario_spec(rows: int = 200, required_runs: int = 2) -> PipelineSpec:
+    """The demo spec with clean (error-free) input, so every quarantine is a fault.
+
+    Source blocks generate ``rows`` rows. Versioned blocks auto-promote after
+    ``required_runs`` shadow runs (fewer than the default 3, to keep scenarios fast;
+    the scenarios read it from the policy).
+    """
     spec = load_spec(DEMO_SPEC_PATH)
     blocks = []
     for block in spec.blocks:
-        if block.name == "b1_ingest":
+        if not block.inputs:
             block = dataclasses.replace(
                 block, params={**block.params, "rows": rows, "error_rate": 0.0}
+            )
+        if block.versions:
+            block = dataclasses.replace(
+                block, shadow=dataclasses.replace(block.shadow, required_runs=required_runs)
             )
         blocks.append(block)
     return dataclasses.replace(spec, blocks=tuple(blocks))
@@ -132,19 +143,81 @@ class ScenarioRunner(abc.ABC):
     ) -> list[Event]:
         return self._read(lambda g: g.events.query(kind=kind, block=block, run_id=run_id))
 
-
-class StandaloneRunner(ScenarioRunner):
-    name = "standalone"
+    # -------------------------------------------------------------- faults
 
     def _faulted(self) -> tuple[PipelineSpec, dict[str, Any]]:
-        return apply_faults(self.spec, self.faults)
+        """The spec with faults wrapping each block's live version."""
+        active = self._read(lambda g: {b: g.active_version(b) for b in self.spec.block_names})
+        return apply_faults(self.spec, self.faults, active)
 
     @contextmanager
     def _acting_guardian(self) -> Iterator[Guardian]:
-        self.close()
         spec, registry = self._faulted()
+        self.close()
         with Guardian(spec, self.root, registry=registry) as g:
             yield g
+
+    # -------------------------------------------------------------- shadow versions
+    # Human actions: every runner performs them through core, like `guardian shadow`.
+
+    def shadow_start(self, block: str, version: str, *, expect_diff: bool = False) -> None:
+        with self._acting_guardian() as g:
+            g.shadow_start(block, version, expect_diff=expect_diff)
+
+    def shadow_stop(self, block: str) -> None:
+        with self._acting_guardian() as g:
+            g.shadow_stop(block)
+
+    def promote(
+        self, block: str, *, approve: bool = False, interrupt: str | None = None
+    ) -> PromotionResult:
+        """Promote; ``interrupt`` simulates a crash "during_replay" (before quarantine
+        records are marked) or "after_replay" (before the registry completes)."""
+        with self._acting_guardian() as g:
+            if interrupt == "during_replay":
+                g.quarantine.mark_replayed = _power_cut  # type: ignore[method-assign]
+            elif interrupt == "after_replay":
+                g.versions.complete_promotion = _power_cut  # type: ignore[method-assign]
+            elif interrupt is not None:
+                raise ValueError(interrupt)
+            return g.promote(block, approve=approve)
+
+    def rollback_version(self, block: str) -> Promotion:
+        with self._acting_guardian() as g:
+            return g.rollback_version(block)
+
+    def active_version(self, block: str) -> str | None:
+        return self._read(lambda g: g.active_version(block))
+
+    def shadow_runs(self, block: str) -> tuple[Shadow | None, list[ShadowRun]]:
+        return self._read(lambda g: g.shadow_runs(block))
+
+    def pending_promotion(self, block: str) -> Promotion | None:
+        return self._read(lambda g: g.versions.pending(block))
+
+    def promotions(self, block: str) -> list[Promotion]:
+        return self._read(lambda g: g.versions.history(block))
+
+    def candidate_snapshot(self, block: str, version: str, run_id: str) -> pd.DataFrame | None:
+        def read(g: Guardian) -> pd.DataFrame | None:
+            store = g.candidate_store(version)
+            return store.read(block, run_id) if store.exists(block, run_id) else None
+
+        return self._read(read)
+
+    def candidate_provenance(self, block: str, version: str, run_id: str) -> dict | None:
+        return self._read(lambda g: g.candidate_store(version).read_provenance(block, run_id))
+
+    def provenance(self, block: str, run_id: str) -> dict | None:
+        return self._read(lambda g: g.snapshots.read_provenance(block, run_id))
+
+
+def _power_cut(*args: Any, **kwargs: Any) -> Any:
+    raise RuntimeError("power cut")
+
+
+class StandaloneRunner(ScenarioRunner):
+    name = "standalone"
 
     def run(self, run_id: str, only: Sequence[str] | None = None) -> RunResult:
         with self._acting_guardian() as g:
@@ -168,8 +241,8 @@ class DagsterRunner(ScenarioRunner):
     def _execute(self, job_name: str, **kwargs: Any) -> Any:
         from guardian.adapters.dagster import build_definitions
 
+        spec, registry = self._faulted()  # same fault wiring
         self.close()
-        spec, registry = StandaloneRunner._faulted(self)  # same fault wiring
         with Guardian(spec, self.root, registry=registry) as g:
             defs = build_definitions(g)
             result = defs.resolve_job_def(job_name).execute_in_process(

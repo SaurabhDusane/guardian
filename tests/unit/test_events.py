@@ -53,7 +53,9 @@ def test_sample_rate_zero_drops_routine_but_keeps_critical(tmp_path) -> None:
 def test_always_logged_set_matches_contract() -> None:
     # CLAUDE.md: ERROR/ROLLBACK/REROUTE/QUARANTINE are never sampled out. WARN joins them
     # so warnings such as "replay merge skipped" cannot be sampled away.
+    # PROMOTION joins them: every change of a block's active version must be auditable.
     assert {k.value for k in ALWAYS_LOGGED} == {
+        "PROMOTION",
         "WARN",
         "ERROR",
         "ROLLBACK",

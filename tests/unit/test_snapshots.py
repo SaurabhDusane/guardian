@@ -106,3 +106,15 @@ def test_last_good_persists_across_instances(tmp_path, df) -> None:
 def test_rejects_unsafe_keys(store, df, block, run_id) -> None:
     with pytest.raises(ValueError):
         store.write(block, run_id, df)
+
+
+def test_provenance_sidecar_is_immutable_and_not_a_run(store, df) -> None:
+    assert store.read_provenance("b1", "r1") is None
+    store.write("b1", "r1", df)
+    store.write_provenance("b1", "r1", {"quality": "FRESH", "inputs": []})
+    assert store.read_provenance("b1", "r1") == {"quality": "FRESH", "inputs": []}
+    with pytest.raises(SnapshotExistsError):
+        store.write_provenance("b1", "r1", {"quality": "STALE"})
+    # provenance can exist without a snapshot (a rolled-back run) and is never a run
+    store.write_provenance("b1", "r2", {"quality": "STALE"})
+    assert store.list_runs("b1") == ["r1"]

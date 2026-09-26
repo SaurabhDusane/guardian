@@ -28,7 +28,10 @@ def block_profiles(spec: PipelineSpec) -> dict[str, BlockProfile]:
     for name in topological_order(spec):
         block = spec.block(name)
         inputs = [outputs[u] for u in block.inputs]
-        out = load_ref(block.fn)(*inputs, **block.params)
+        if block.load is not None:  # source with a loader: params go to the loader
+            out = load_ref(block.fn)(load_ref(block.load)(**block.params))
+        else:
+            out = load_ref(block.fn)(*inputs, **block.params)
         outputs[name] = out
         seen = {c for frame in inputs for c in frame.columns}
         derived = tuple(c for c in out.columns if c not in seen) or tuple(out.columns)

@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import pandas as pd
 
@@ -43,6 +44,12 @@ class SnapshotStore(Protocol):
     def mark_last_good(self, block: str, run_id: str) -> DataRef: ...
 
     def last_good(self, block: str) -> DataRef | None: ...
+
+    def write_provenance(self, block: str, run_id: str, provenance: Mapping[str, Any]) -> None:
+        """Record where (block, run_id)'s inputs came from. Immutable, like snapshots."""
+        ...
+
+    def read_provenance(self, block: str, run_id: str) -> dict[str, Any] | None: ...
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
@@ -117,3 +124,19 @@ class LocalParquetSnapshotStore:
             return None
         run_id = json.loads(pointer.read_text(encoding="utf-8"))["run_id"]
         return DataRef(block=block, run_id=run_id)
+
+    def _provenance_path(self, block: str, run_id: str) -> Path:
+        return self._block_dir(block) / f"{validate_name(run_id, 'run_id')}.provenance.json"
+
+    def write_provenance(self, block: str, run_id: str, provenance: Mapping[str, Any]) -> None:
+        path = self._provenance_path(block, run_id)
+        if path.exists():
+            raise SnapshotExistsError(f"provenance for ({block}, {run_id}) already exists")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_bytes(path, json.dumps(provenance, sort_keys=True, default=str).encode())
+
+    def read_provenance(self, block: str, run_id: str) -> dict[str, Any] | None:
+        path = self._provenance_path(block, run_id)
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))

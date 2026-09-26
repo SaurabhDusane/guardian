@@ -7,6 +7,7 @@ from guardian.runner.spec_loader import load_spec
 
 from ..helpers.roles import (
     ROLES,
+    ancestors,
     blocks_by_role,
     dependents,
     descendants,
@@ -80,6 +81,8 @@ def test_dependents_and_descendants() -> None:
     assert dependents(DIAMOND, "a") == ["b", "c"]
     assert descendants(DIAMOND, "a") == ["b", "c", "d"]
     assert descendants(DIAMOND, "d") == []
+    assert ancestors(DIAMOND, "d") == ["a", "b", "c"]
+    assert ancestors(DIAMOND, "a") == []
 
 
 def test_representative_prefers_the_purest_block() -> None:

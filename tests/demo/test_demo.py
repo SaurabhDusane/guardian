@@ -27,7 +27,7 @@ def test_csv_loader_swaps_in(tmp_path) -> None:
     raw = SyntheticOrdersLoader(rows=20, seed=3).load()
     path = tmp_path / "orders.csv"
     raw.to_csv(path, index=False)
-    loaded = blocks.ingest(loader="guardian.demo.data_gen:CsvLoader", path=str(path))
+    loaded = blocks.load_orders(loader="guardian.demo.data_gen:CsvLoader", path=str(path))
     assert isinstance(CsvLoader(path), DatasetLoader)
     assert list(loaded.columns) == list(RAW_COLUMNS) and len(loaded) == 20
 
@@ -88,3 +88,24 @@ def test_demo_replay_after_fix(tmp_path) -> None:
         assert result.replayed == len(failing) and result.still_failing == 0
         decision = g.on_output("b3_standardize", "check", g.read(result.snapshot))
         assert decision.action is Action.PASS
+
+
+def test_v2_matches_v1_and_v_bad_differs_on_messy_demo_data(tmp_path) -> None:
+    """v2s are improvements that leave well-formed rows alone; v_bads are off-by-ones.
+
+    Each version runs on the live inputs its block saw in a real (messy) demo run.
+    """
+    with Guardian(load_spec(DEMO_SPEC), tmp_path) as g:
+        Executor(g).run("r1")
+        checked = 0
+        for block in g.spec.blocks:
+            if not block.versions:
+                continue
+            prov = g.snapshots.read_provenance(block.name, "r1")
+            inputs = [g.snapshots.read(i["block"], i["run_id"]) for i in prov["inputs"]]
+            inputs = g.prepare_inputs(block.name, inputs)  # the loaded frame for a source
+            v1, v2, bad = (g.version_fn(block.name, v)(*inputs) for v in ("v1", "v2", "v_bad"))
+            pd.testing.assert_frame_equal(v2, v1, obj=f"{block.name} v2")
+            assert not bad.equals(v1), f"{block.name} v_bad"
+            checked += 1
+    assert checked == 5

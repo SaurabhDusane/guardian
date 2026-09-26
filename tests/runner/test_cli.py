@@ -138,3 +138,55 @@ def test_stale_reads_are_visible_in_the_summary(tmp_path) -> None:
         "run", "demo/pipeline.yaml", "--root", root, "--run-id", "r2", "--fault", "b2_parse:crash"
     )
     assert "b2_parse@r1 (stale)" in result.output
+
+
+def test_shadow_commands_end_to_end(tmp_path) -> None:
+    root = str(tmp_path)
+    invoke("run", "demo/pipeline.yaml", "--root", root, "--run-id", "r0")
+    result = invoke("shadow", "start", "b6_enrich", "v2", "--root", root)
+    assert result.exit_code == 0 and "shadowing v2 next to live v1" in result.output
+    result = invoke("shadow", "status", "--root", root)
+    assert "b6_enrich" in result.output and "v2" in result.output
+    invoke("run", "demo/pipeline.yaml", "--root", root, "--run-id", "r1")
+    result = invoke("shadow", "status", "b6_enrich", "--root", root)
+    assert result.exit_code == 0 and "PARITY" in result.output and "r1" in result.output
+    result = invoke("shadow", "promote", "b6_enrich", "--root", root)
+    assert result.exit_code == 1 and "needs approval" in result.output
+    result = invoke("shadow", "promote", "b6_enrich", "--approve", "--root", root)
+    assert result.exit_code == 0 and "promoted v1 -> v2" in result.output
+    result = invoke("status", "--root", root)
+    assert "v2 (spec: v1)" in result.output  # the registry overrides the spec's active
+    result = invoke("shadow", "rollback", "b6_enrich", "--root", root)
+    assert result.exit_code == 0 and "rolled back v2 -> v1" in result.output
+
+
+def test_shadow_commands_reject_unknown_block_and_version(tmp_path) -> None:
+    root = str(tmp_path)
+    invoke("run", "demo/pipeline.yaml", "--root", root, "--run-id", "r0")
+    for args in (
+        ["shadow", "start", "no_such_block", "v2"],
+        ["shadow", "status", "no_such_block"],
+        ["shadow", "promote", "no_such_block"],
+        ["shadow", "rollback", "no_such_block"],
+        ["shadow", "stop", "no_such_block"],
+    ):
+        result = invoke(*args, "--root", root)
+        assert result.exit_code == 2 and "no_such_block" in result.output, args
+    result = invoke("shadow", "start", "b6_enrich", "v9", "--root", root)
+    assert result.exit_code == 2 and "no version 'v9'" in result.output
+    result = invoke("shadow", "start", "b3_standardize", "v2", "--root", root)
+    assert result.exit_code == 2 and "no version" in result.output  # a block without versions
+
+
+@pytest.mark.parametrize(
+    "block",
+    [b.name for b in load_spec(find_spec(Path("demo/pipeline.yaml"))).blocks if b.versions],
+)
+def test_shadow_start_works_for_every_versioned_block(tmp_path, block) -> None:
+    root = str(tmp_path)
+    invoke("run", "demo/pipeline.yaml", "--root", root, "--run-id", "r0")
+    assert invoke("shadow", "start", block, "v_bad", "--root", root).exit_code == 0
+    invoke("run", "demo/pipeline.yaml", "--root", root, "--run-id", "r1")
+    result = invoke("shadow", "status", block, "--root", root)
+    assert "PARITY" in result.output and " no " in result.output  # v_bad is caught
+    assert invoke("shadow", "stop", block, "--root", root).exit_code == 0

@@ -16,6 +16,7 @@ import pandas as pd
 from guardian.core.events import EventKind
 from guardian.core.guardian import Guardian, new_run_id
 from guardian.core.models import Action, BlockStatus, DataRef, Decision, NoSafeInputError
+from guardian.core.shadow import ShadowRun
 from guardian.runner.spec_loader import topological_order
 
 
@@ -38,6 +39,8 @@ class BlockReport:
     reason: str | None = None
     decision: Decision | None = None
     seconds: float = 0.0
+    version: str | None = None  # the live version that ran
+    shadow: ShadowRun | None = None  # this run's shadow candidate comparison, if any
 
     @property
     def rerouted(self) -> bool:
@@ -97,8 +100,11 @@ class Executor:
         g = self.guardian
         spec = g.spec.block(block)
         skip = g.skip_reason(block)
-        if skip is not None:
+        has_candidate = g.shadow_candidate(block) is not None
+        if skip is not None and not has_candidate:
             return BlockReport(block, Outcome.SKIPPED, g.status(block), reason=skip)
+        # A block in shadow still resolves its live inputs when it is OUT: the
+        # candidate runs on them even though the live version does not.
 
         started = time.perf_counter()
         g.events.emit(EventKind.BLOCK_STARTED, block=block, run_id=run_id)
@@ -112,15 +118,29 @@ class Executor:
         except NoSafeInputError as exc:
             return BlockReport(
                 block,
-                Outcome.BLOCKED,
+                Outcome.SKIPPED if skip is not None else Outcome.BLOCKED,
                 g.status(block),
                 sources=tuple(refs),
                 reason=str(exc),
                 seconds=time.perf_counter() - started,
             )
 
-        decision = g.handle_result(block, run_id, g.compute(block, frames))
+        inputs = g.prepare_inputs(block, frames)  # same inputs for live and candidate
+        if skip is not None:
+            shadow = g.run_shadow(block, run_id, inputs, None)
+            return BlockReport(
+                block,
+                Outcome.SKIPPED,
+                g.status(block),
+                sources=tuple(refs),
+                reason=skip,
+                seconds=time.perf_counter() - started,
+                shadow=shadow,
+            )
+        version = g.active_version(block)
+        decision = g.handle_result(block, run_id, g.compute(block, inputs))
         assert decision is not None  # not skipped: checked above, inputs all resolved
+        shadow = g.run_shadow(block, run_id, inputs, decision)
         passed = decision.action is Action.PASS
         report = BlockReport(
             block=block,
@@ -133,6 +153,8 @@ class Executor:
             reason=decision.reason,
             decision=decision,
             seconds=time.perf_counter() - started,
+            version=version,
+            shadow=shadow,
         )
         g.events.emit(
             EventKind.BLOCK_FINISHED,
