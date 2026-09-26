@@ -148,6 +148,9 @@ class BlockSpec:
     auto_diagnose: bool = False
     # Columns whose values are masked in anything sent to an LLM.
     redact_columns: tuple[str, ...] = ()
+    # The block's unit tests (pytest node ids or paths, relative to the repository root).
+    # A proposed fix must pass them before it can become a pull request.
+    tests: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         validate_name(self.name, "block name")
@@ -155,6 +158,10 @@ class BlockSpec:
         if not all(isinstance(c, str) and c for c in redact):
             raise ValueError(f"block {self.name!r}: redact_columns must be column names")
         object.__setattr__(self, "redact_columns", redact)
+        tests = tuple(self.tests)
+        if not all(isinstance(t, str) and t for t in tests):
+            raise ValueError(f"block {self.name!r}: tests must be pytest node ids or paths")
+        object.__setattr__(self, "tests", tests)
         object.__setattr__(self, "versions", MappingProxyType(dict(self.versions)))
         if self.versions:
             for version in self.versions:

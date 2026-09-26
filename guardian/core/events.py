@@ -1,8 +1,8 @@
 """Structured JSON event logging ("short logging").
 
 Each kept event is appended to ``events.jsonl`` and inserted into a DuckDB table.
-Routine events are sampled at ``sample_rate``; DIAGNOSIS, PROMOTION, WARN, ERROR, ROLLBACK,
-REROUTE and QUARANTINE events are always kept.
+Routine events are sampled at ``sample_rate``; DIAGNOSIS, PROPOSAL, PROMOTION, WARN,
+ERROR, ROLLBACK, REROUTE and QUARANTINE events are always kept.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ class EventKind(StrEnum):
     SHADOW = "SHADOW"
     # Never sampled out:
     DIAGNOSIS = "DIAGNOSIS"
+    PROPOSAL = "PROPOSAL"
     PROMOTION = "PROMOTION"
     WARN = "WARN"
     ERROR = "ERROR"
@@ -44,6 +45,7 @@ class EventKind(StrEnum):
 ALWAYS_LOGGED: frozenset[EventKind] = frozenset(
     {
         EventKind.DIAGNOSIS,
+        EventKind.PROPOSAL,
         EventKind.PROMOTION,
         EventKind.WARN,
         EventKind.ERROR,

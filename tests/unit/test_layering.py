@@ -34,3 +34,25 @@ def test_no_block_names_in_core_runner_adapters_or_agent() -> None:
             text = path.read_text(encoding="utf-8")
             found = [n for n in names if n in text]
             assert not found, (path, found)
+
+
+def test_agent_code_never_promotes_merges_or_changes_state() -> None:
+    """Belt and braces for the runtime guards (agent_view, SafeGit, GitHubClient): no
+    agent module calls a state-changing Guardian method or a merge endpoint. The eval
+    harness is the one exception: it plays the human reviewer on its own scratch copies."""
+    import re
+
+    root = Path(__file__).parents[2] / "guardian" / "agent"
+    calls = re.compile(
+        r"\.(promote|shadow_start|shadow_stop|rollback_version|set_block_status|replay|"
+        r"begin_promotion|complete_promotion)\("
+    )
+    merges = re.compile(r"/merge\b|merge_pull|\"merge\"|'merge'")
+    for path in root.glob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        found_calls = calls.findall(text)
+        if path.name == "eval.py":
+            assert found_calls == ["shadow_start", "promote"], found_calls
+        else:
+            assert not found_calls, (path.name, found_calls)
+        assert path.name == "safety.py" or not merges.findall(text), path.name

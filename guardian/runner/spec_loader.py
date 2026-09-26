@@ -27,6 +27,7 @@ _BLOCK_KEYS = {
     "annotate_quality",
     "auto_diagnose",
     "redact_columns",
+    "tests",
 }
 _SHADOW_KEYS = {"required_runs", "max_changed_fraction", "min_pass_rate"}
 _FALLBACK_KEYS = {"replaces", "source", "adapter"}
@@ -127,6 +128,9 @@ def _parse_block(raw: Mapping[str, Any], where: str) -> BlockSpec:
     redact = raw.get("redact_columns") or []
     if not isinstance(redact, list) or not all(isinstance(c, str) and c for c in redact):
         raise SpecError(f"{where}: 'redact_columns' must be a list of column names")
+    tests = raw.get("tests") or []
+    if not isinstance(tests, list) or not all(isinstance(t, str) and t for t in tests):
+        raise SpecError(f"{where}: 'tests' must be a list of pytest node ids or paths")
     fallbacks_raw = raw.get("fallbacks") or []
     if not isinstance(fallbacks_raw, list):
         raise SpecError(f"{where}: 'fallbacks' must be a list")
@@ -151,6 +155,7 @@ def _parse_block(raw: Mapping[str, Any], where: str) -> BlockSpec:
             annotate_quality=_flag(raw, "annotate_quality", where),
             auto_diagnose=_flag(raw, "auto_diagnose", where),
             redact_columns=tuple(redact),
+            tests=tuple(tests),
         )
     except ValueError as exc:
         if isinstance(exc, SpecError):

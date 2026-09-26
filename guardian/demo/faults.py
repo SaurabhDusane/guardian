@@ -135,16 +135,19 @@ def null_burst(column: str, fraction: float, seed: int = 0) -> Fault:
     return Fault(f"null_burst({column}, {fraction})", apply)
 
 
-def code_bug(fraction: float = 0.5, seed: int = 0) -> Fault:
+def code_bug(
+    fraction: float = 0.5, seed: int = 0, *, columns: Sequence[str] | None = None
+) -> Fault:
     """Replace the block's implementation with a buggy rewrite of it.
 
     The rewrite still calls the original logic, then mishandles a fraction of rows:
-    numbers get the wrong sign, text gets a trailing space, timestamps are lost. It is
-    a new function (no ``functools.wraps``), so the block's code fingerprint changes.
+    numbers get the wrong sign, text gets a trailing space, timestamps are lost. Only
+    ``columns`` are affected if given (default: all). It is a new function (no
+    ``functools.wraps``), so the block's code fingerprint changes.
     """
 
     def replace(fn: Callable[..., pd.DataFrame]) -> Callable[..., pd.DataFrame]:
-        return rewrite(fn, lambda n: pick_positions(n, fraction, seed))
+        return rewrite(fn, lambda n: pick_positions(n, fraction, seed), columns)
 
     return Fault(f"code_bug({fraction})", lambda df: df, replace)
 

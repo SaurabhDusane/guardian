@@ -10,11 +10,12 @@ import pytest
 from typer.testing import CliRunner
 
 from guardian.agent.diagnose import BAD_CITATION, INVALID_RESPONSE, ROOT_CAUSES, FakeClient
-from guardian.agent.eval import EXPECTED, FAULT_TYPES, generate_cases, run_eval
+from guardian.agent.eval import EXPECTED, FAULT_TYPES, generate_cases, run_eval, run_fix_eval
 from guardian.runner.cli import app
 
+from ..helpers.project_repo import SPEC_REL, repo_state
 from ..helpers.roles import representative, roles_of
-from .helpers import ROLES, SPEC, answer
+from .helpers import ROLES, SPEC, answer, broken_fix, revert_fix
 
 
 @pytest.fixture(scope="module")
@@ -190,3 +191,36 @@ def test_eval_cli_with_recorded_answers(tmp_path) -> None:
         app, ["eval", "diagnose", "--out", str(out)], env={"GUARDIAN_LLM_PROVIDER": ""}
     )
     assert unconfigured.exit_code == 1 and "GUARDIAN_LLM_PROVIDER" in unconfigured.output
+
+
+def test_fix_success_rate_by_role(cases, project_repo) -> None:
+    """Every block's code_bug case: diagnose -> propose (dry run) -> shadow -> promote.
+    One block gets a fix that breaks it, one is misdiagnosed; the rest must succeed."""
+    broken = representative(SPEC, "leaf")
+    misdiagnosed = representative(SPEC, "source")
+    responses = {}
+    for c in cases:
+        if c.fault != "code_bug":
+            continue
+        cause = "schema_change" if c.block == misdiagnosed else "code_bug"
+        responses[c.case_id] = answer(cause, ("E1",))
+        fix = broken_fix(SPEC, c.block) if c.block == broken else revert_fix(SPEC, c.block)
+        responses[f"{c.case_id}:fix"] = fix
+    before = repo_state(project_repo)
+    report = run_fix_eval(
+        cases, FakeClient(responses, model="scripted"), spec=SPEC, spec_path=project_repo / SPEC_REL
+    )
+    assert repo_state(project_repo) == before
+
+    expected = {b: b not in (broken, misdiagnosed) for b in SPEC.block_names}
+    assert {r.case.block: r.promoted for r in report.results} == expected
+    status = {r.case.block: r.proposal for r in report.results}
+    assert status[broken] == "failed" and status[misdiagnosed] == "rejected"
+    assert report.success_rate == pytest.approx(sum(expected.values()) / len(expected))
+    for role, (ok, n) in report.by_role().items():
+        members = [b for b in SPEC.block_names if role in roles_of(SPEC, b)]
+        assert (ok, n) == (sum(expected[b] for b in members), len(members))
+    assert set(report.by_role()) == set(ROLES)
+    md = report.to_markdown()
+    assert "| fix success |" in md and "## By DAG role" in md
+    json.dumps(report.to_dict())

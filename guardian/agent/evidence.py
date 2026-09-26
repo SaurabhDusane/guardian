@@ -71,6 +71,7 @@ _SKIPPED_EVENTS = frozenset(
         EventKind.BLOCK_FINISHED,
         EventKind.SHADOW,
         EventKind.DIAGNOSIS,
+        EventKind.PROPOSAL,
     }
 )
 _NOTABLE_EVENTS = ALWAYS_LOGGED | {EventKind.STATUS_CHANGE, EventKind.REPLAY}

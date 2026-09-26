@@ -397,6 +397,33 @@ class Diagnosis:
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), indent=2, sort_keys=True, ensure_ascii=False)
 
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> Diagnosis:
+        return cls(
+            pipeline=raw["pipeline"],
+            block=raw["block"],
+            run_id=raw["run_id"],
+            root_cause=raw["root_cause"],
+            confidence=raw["confidence"],
+            summary=raw["summary"],
+            claims=tuple(Claim(c["statement"], tuple(c["evidence"])) for c in raw["claims"]),
+            status=raw["status"],
+            model=raw["model"],
+            attempts=raw["attempts"],
+            rejection=raw.get("rejection"),
+            reason=raw.get("reason"),
+            unknown_evidence=tuple(raw.get("unknown_evidence", ())),
+            proposed=raw.get("proposed"),
+        )
+
+    @classmethod
+    def load(cls, root: Path | str, block: str, run_id: str) -> Diagnosis | None:
+        """The diagnosis saved for (block, run_id), if any."""
+        path = diagnosis_dir(root, block, run_id) / DIAGNOSIS_FILE
+        if not path.exists():
+            return None
+        return cls.from_dict(json.loads(path.read_text(encoding="utf-8")))
+
     def write(self, root: Path | str) -> Path:
         path = diagnosis_dir(root, self.block, self.run_id) / DIAGNOSIS_FILE
         path.parent.mkdir(parents=True, exist_ok=True)

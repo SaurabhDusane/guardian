@@ -855,6 +855,177 @@ No API key was available in the environment that built this phase, so no numbers
 reported here rather than invented ones. Paste the summary table from
 `bench/agent_eval.md` here after the first run.
 
+## Self-healing loop
+
+Diagnosis says *why* a block failed. `guardian propose <block> [--run <run_id>]
+[--open-pr]` goes one step further: it proposes a fix, verifies it, and at most opens a
+draft pull request. Humans decide everything after that. The full loop, for any block:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant P as Pipeline run
+    participant G as Guardian core
+    participant A as Agent (advisory)
+    participant W as Git worktree
+    participant H as Human reviewer
+    P->>G: block output
+    G->>G: detect: validation fails (or crash) → ROLLBACK
+    G->>P: contain: quarantine rows, dependents read fallback / last-good
+    A->>G: diagnose: read-only evidence bundle → root cause + cited claims
+    A->>W: propose: new branch guardian/fix/…, append fix as a NEW version
+    W->>W: block's unit tests + shadow run on the failing run's inputs
+    A-->>H: dry run: patch + PR body in .guardian/proposals/ (or a draft PR)
+    H->>G: merge PR, then shadow: guardian shadow start BLOCK fixN
+    P->>G: next runs: candidate runs in shadow on live inputs
+    H->>G: approve: guardian shadow promote BLOCK --approve
+    G->>G: promote: fixN becomes active
+    G->>G: replay: quarantined rows re-run through fixN
+    P->>G: next run: FRESH output downstream
+```
+
+### What `propose` does
+
+The LLM (through the same `LLMClient` as diagnosis) answers with a fix plan that must
+fit the diagnosed root cause:
+
+| root cause | allowed fix |
+|---|---|
+| `code_bug` | `new_version`: a new function, added to the block's `versions` as `fix1`, `fix2`, … |
+| `schema_change` | `schema_update` (a new schema object the block points to) or `adapter_update` (a new adapter on a fallback edge standing in for the block) |
+| `upstream_data_drift` | `schema_update`, or `upstream_note`: a note for the upstream owner, no code |
+| `unknown` | nothing: no fix is proposed |
+
+The plan is checked like a diagnosis:
+
+- Invalid JSON, a disallowed action, or code that doesn't parse or rebinds an existing
+  name is retried once, then rejected.
+- A citation of a nonexistent evidence ID is rejected at once.
+
+New code is only ever **appended** under a new name. The patch can't edit an existing
+definition, and a new version never replaces the live one, so a fix still has to earn
+promotion through shadow runs.
+
+Then, in a temporary `git worktree` on a new `guardian/fix/<block>/<run>-<version>`
+branch:
+
+1. **Apply.** The definition is appended to the right module, and the spec is edited
+   with comments kept. Every other block is verified to be unchanged.
+2. **Unit tests.** The block's unit tests run against the worktree's code. Each block
+   declares them in the spec (`tests:`). The demo points every block at
+   `tests/demo/test_block_contracts.py`, which checks every version and fallback
+   adapter on clean data, so a new version is covered automatically. A block without
+   tests can't get a fix.
+3. **Shadow run.** The candidate runs on the failing run's inputs: the snapshots the
+   block actually read, or its reloaded source data. It must pass validation under
+   the block's shadow policy. A schema fix re-validates the failing output; an adapter
+   fix is validated against the block's schema.
+4. **Record.** Only if both pass is the proposal `ready`, and `--open-pr` pushes the
+   branch and opens a **draft** PR. The token comes from `GITHUB_TOKEN`, or the
+   variable named by `GUARDIAN_GITHUB_TOKEN_ENV`; the repository comes from the
+   `origin` remote or `GUARDIAN_GITHUB_REPO`. Otherwise the attempt is recorded as
+   `failed` with its reasons. The default is `--dry-run`: GitHub is never touched.
+
+Everything lands in `.guardian/proposals/<block>/<run_id>/`: `proposal.json`,
+`patch.diff`, `pr_body.md` (or `note.md`) and a copy of the patched file. Every attempt
+is also appended to `.guardian/proposals/<block>/attempts.jsonl`, and a PROPOSAL event
+is logged. The PR body holds:
+
+- the diagnosis;
+- the cited evidence, by ID;
+- the fix's rationale and its own evidence;
+- the checks and the shadow comparison table;
+- the commands the reviewer runs after merging;
+- the patch.
+
+### Example: fixing the bad deploy of b6_enrich
+
+Same failure as in [Automated diagnosis](#automated-diagnosis). Both LLM answers here
+(the diagnosis and the fix plan) are recorded fakes; everything else is real output,
+including the tests, the shadow run and the patch.
+
+```
+$ guardian propose b6_enrich
+Proposal for b6_enrich on r2 (root cause code_bug): ready
+action: new_version   The failures start with the code change in E17 while the schema (E5) and
+inputs are unchanged; restore the last good enrich logic as a new version.
+new version: fix1 -> demo.blocks:enrich_fixed
+unit tests: passed (pytest -q -p no:cacheprovider
+tests/demo/test_block_contracts.py::test_block_contract[b6_enrich])
+                               Shadow run on the failing run's inputs
+┏━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ metric                 ┃ live `v1` on r2                    ┃ candidate `fix1` (same inputs)     ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ outcome                │ ROLLBACK (bad-row fraction 0.5011  │ PASS                               │
+│                        │ exceeds threshold 0.1)             │                                    │
+│ rows out               │ 443                                │ 443                                │
+│ bad rows               │ 222                                │ 0                                  │
+│ pass rate              │ 49.9%                              │ 100.0%                             │
+│ min pass rate (policy) │                                    │ 90.00%                             │
+│ vs last good (r1)      │                                    │ 0 added, 0 removed, 0 changed      │
+│                        │                                    │ (0.0%)                             │
+└────────────────────────┴────────────────────────────────────┴────────────────────────────────────┘
+`b6_enrich` is DEGRADED, so its shadow runs are in absolute mode: promotion needs an explicit
+approval (`guardian shadow promote --approve`).
+Proposal: .guardian/proposals/b6_enrich/r2
+Dry run: GitHub was not touched. Re-run with --open-pr to open a draft PR.
+```
+
+The patch appends the new function and one line to the spec:
+
+```diff
++def enrich_fixed(*args, **kwargs):
++    return enrich(*args, **kwargs)
+...
+       v_bad: demo.blocks:enrich_bad
++      fix1: demo.blocks:enrich_fixed
+     active: v1
+```
+
+Here the "fix" restores the committed implementation, because the fault was injected
+at run time: exactly what reverting a bad deploy looks like. Scenario 10 runs this loop
+for every DAG role: detect, contain, diagnose, propose (dry run), then, as the human
+reviewer, shadow the proposed version while the bug is still live, check that
+promotion is refused without approval and succeeds with it, and check that the next
+run is FRESH downstream.
+
+### Fix success
+
+`guardian eval fix` injects a `code_bug` into **every** block and runs the whole loop
+for each: diagnose, propose (dry run), then shadow and promote with approval, the
+reviewer's part, which only the eval harness plays, on its own scratch copies. It
+reports the fraction of proposals whose new version passes shadow promotion, overall
+and by DAG role, in `bench/agent_fix_eval.md`. In pytest it runs against FakeClient
+only; the test scripts a broken fix and a misdiagnosis and checks the metric against an
+independent tally. Real-model numbers are not recorded yet, for the same reason as
+above (no API key where this was built).
+
+### What the agent is NOT allowed to do
+
+Each limit below is enforced in code (`guardian/agent/safety.py`) and tested
+(`tests/agent/test_safety.py`, `tests/unit/test_layering.py`):
+
+- **Never promote, shadow, roll back, replay or change a block's status.** The agent
+  only sees Guardian through `agent_view`, which raises on every state-changing method
+  and on writes to the version, shadow, status, snapshot and quarantine stores.
+  A static test also checks that no agent module calls them; the eval harness is the
+  one documented exception.
+- **Never merge.** Its GitHub client can create a draft pull request and nothing else.
+  Every other API call, merge included, is refused before it is sent.
+- **Never push to the default branch.** Its git wrapper only allows a list of
+  subcommands, with no merge, rebase, pull, reset, checkout or cherry-pick. Commits are
+  allowed only on its own `guardian/fix/*` branches. Pushes are allowed only for such a
+  branch, to the same name, never forced, never to `main`, `master` or the remote's
+  default branch.
+- **Never edit existing code in place.** New definitions are appended under new names,
+  and a patch that would remove or rebind anything is rejected. A code fix is a new
+  version, so it has to pass shadow promotion like any other.
+- **Never open a PR for an unverified fix.** Unit tests and the shadow run must both
+  pass, and the default is a dry run.
+- **Never act on an unknown diagnosis, or cite evidence that isn't there.**
+- **Never see redacted data.** Everything it is sent comes from the minimized
+  evidence bundle.
+
 ## Design decisions
 
 ### Why the core is orchestrator-agnostic
@@ -1002,11 +1173,13 @@ guardian/
                shadow, provenance, guardian facade
   runner/      spec_loader, executor, cli
   adapters/dagster/  io_manager, checks, replay, definitions
-  agent/       evidence bundles, LLM diagnosis (Anthropic + fake clients), eval
+  agent/       evidence bundles, LLM diagnosis (Anthropic + fake clients), fix
+               proposals (propose), safety guards, eval
   demo/        data_gen, schemas, blocks, faults, refactor (code_bug), pipeline.yaml
 bench/
   run_bench.py throughput / recovery / overhead benchmarks -> bench/results.md
   agent_eval.md  written by `guardian eval diagnose` (real model; manual)
+  agent_fix_eval.md  written by `guardian eval fix` (real model; manual)
 tests/
   helpers/     blocks_by_role (DAG roles) and block profiles, shared by the tests
   unit/        per-module core tests, invariant property test, layering test, role helper

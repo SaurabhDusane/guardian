@@ -233,3 +233,20 @@ def test_auto_diagnose_and_redact_columns() -> None:
     for bad in ("email", [1], [""]):
         with pytest.raises(SpecError, match="redact_columns"):
             parse_spec(spec({"name": "a", "fn": "m:f", "redact_columns": bad}))
+
+
+def test_block_tests_key() -> None:
+    s = parse_spec(spec({"name": "a", "fn": "m:f", "tests": ["tests/x.py::t[a]"]}))
+    assert s.block("a").tests == ("tests/x.py::t[a]",)
+    assert parse_spec(spec({"name": "a", "fn": "m:f"})).block("a").tests == ()
+    for bad in ("tests/x.py", [1], [""]):
+        with pytest.raises(SpecError, match="tests"):
+            parse_spec(spec({"name": "a", "fn": "m:f", "tests": bad}))
+
+
+def test_demo_blocks_all_declare_unit_tests() -> None:
+    demo = load_spec(Path(__file__).parents[2] / "guardian" / "demo" / "pipeline.yaml")
+    for block in demo.blocks:
+        assert block.tests == (
+            f"tests/demo/test_block_contracts.py::test_block_contract[{block.name}]",
+        )

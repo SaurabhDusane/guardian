@@ -1,5 +1,5 @@
 """Command-line entry point: `guardian run|replay|status|set-status|shadow|impact|lineage|
-diagnose|eval`."""
+diagnose|propose|eval`."""
 
 from __future__ import annotations
 
@@ -634,6 +634,80 @@ def render_diagnosis(result: DiagnosisResult) -> None:
     console.print(f"Diagnosis: {result.diagnosis_path}")
 
 
+@app.command("propose")
+def propose_cmd(
+    block: str = typer.Argument(..., help="Any block in the spec."),
+    run: str | None = typer.Option(
+        None, "--run", help="Run whose failure to fix (default: the block's latest ROLLBACK)."
+    ),
+    open_pr: bool = typer.Option(
+        False,
+        "--open-pr/--dry-run",
+        help="Open a draft PR if the fix passes its checks (default: dry run, GitHub untouched).",
+    ),
+    repo: Path | None = typer.Option(
+        None, "--repo", help="Git repository to patch (default: the one holding the spec)."
+    ),
+    provider: str | None = ProviderOption,
+    model: str | None = ModelOption,
+    fake_responses: Path | None = FakeResponsesOption,
+    spec: Path | None = SpecOption,
+    root: Path = RootOption,
+) -> None:
+    """Propose a verified fix for BLOCK's failure (advisory: never merges or promotes).
+
+    Diagnoses the run if needed, applies the proposed change in a temporary git worktree
+    on a new branch, runs the block's unit tests and a shadow run on the failing run's
+    inputs. Writes the patch and PR body to <root>/proposals/<block>/<run>/.
+    """
+    from guardian.agent.propose import FAILED, REJECTED, propose
+
+    spec_path = _spec_for(root, spec)
+    with _guarded(root, spec) as g:
+        g.spec.block(block)
+        client = make_client(_llm_config(provider, model, fake_responses))
+        proposal = propose(
+            g, block, run, client=client, spec_path=spec_path, repo=repo, open_pr=open_pr
+        )
+        render_proposal(proposal)
+        if proposal.status in (FAILED, REJECTED):
+            raise typer.Exit(code=1)
+
+
+def render_proposal(proposal) -> None:
+    style = {"ready": "green", "opened": "green", "note": "cyan"}.get(proposal.status, "red")
+    console.print(
+        f"[bold]Proposal for {proposal.block} on {proposal.run_id}[/bold] "
+        f"(root cause {proposal.root_cause}): [{style}]{proposal.status}[/]"
+    )
+    if proposal.plan:
+        console.print(f"action: {proposal.action}   {escape(proposal.plan.rationale)}")
+    if proposal.version:
+        console.print(f"new version: {proposal.version} -> {proposal.ref}")
+    elif proposal.ref:
+        console.print(f"new definition: {proposal.ref}")
+    if proposal.tests:
+        ok = "passed" if proposal.tests.passed else "[red]failed[/]"
+        console.print(f"unit tests: {ok} ({escape(proposal.tests.command)})")
+    if proposal.shadow:
+        table = Table(title="Shadow run on the failing run's inputs")
+        for column in proposal.shadow.columns:
+            table.add_column(escape(column))
+        for row in proposal.shadow.rows:
+            table.add_row(*(escape(c) for c in row))
+        console.print(table)
+        for note in proposal.shadow.notes:
+            console.print(escape(note))
+    for reason in proposal.reasons:
+        console.print(f"[red]{escape(reason)}[/]")
+    if proposal.pr_url:
+        console.print(f"Draft PR: {proposal.pr_url}")
+    if proposal.dir:
+        console.print(f"Proposal: {proposal.dir}")
+    if proposal.status == "ready":
+        console.print("Dry run: GitHub was not touched. Re-run with --open-pr to open a draft PR.")
+
+
 eval_app = typer.Typer(help="Evaluate Guardian's agents.", no_args_is_help=True)
 app.add_typer(eval_app, name="eval")
 
@@ -704,6 +778,68 @@ def eval_diagnose_cmd(
     )
     for fault, (c, n) in report.by_fault().items():
         console.print(f"  {fault}: {c}/{n}")
+    console.print(f"Report: {out}")
+
+
+@eval_app.command("fix")
+def eval_fix_cmd(
+    spec: Path = typer.Argument(Path("demo/pipeline.yaml"), help="Pipeline spec to evaluate on."),
+    out: Path = typer.Option(
+        Path("bench") / "agent_fix_eval.md", "--out", help="Markdown report (a .json goes next)."
+    ),
+    repo: Path | None = typer.Option(
+        None, "--repo", help="Git repository to propose fixes against (default: the spec's)."
+    ),
+    blocks: list[str] | None = typer.Option(None, "--block", help="Only these blocks."),
+    record: Path | None = typer.Option(
+        None, "--record", help="Save the model's answers, for replay with --provider fake."
+    ),
+    provider: str | None = ProviderOption,
+    model: str | None = ModelOption,
+    fake_responses: Path | None = FakeResponsesOption,
+) -> None:
+    """Fix success: inject a code bug into every block, let the agent diagnose and propose
+    a fix (dry run), and check that the fix passes shadow promotion."""
+    import tempfile
+
+    from guardian.agent.diagnose import RecordingClient
+    from guardian.agent.eval import generate_cases, run_fix_eval
+
+    spec_path = find_spec(spec)
+    try:
+        pipeline = load_spec(spec_path)
+        client = make_client(_llm_config(provider, model, fake_responses))
+    except SpecError as exc:
+        console.print(f"[red]Invalid spec:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+    except GuardianError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    recorder = RecordingClient(client) if record else None
+    with tempfile.TemporaryDirectory(prefix="guardian-fix-eval-") as tmp:
+        try:
+            cases = generate_cases(pipeline, Path(tmp), blocks=blocks or None, faults=["code_bug"])
+        except (KeyError, ValueError) as exc:
+            console.print(f"[red]{exc.args[0] if exc.args else exc}[/red]")
+            raise typer.Exit(code=2) from exc
+        console.print(
+            f"Proposing fixes for {len(cases)} case(s) with model {escape(client.model)}..."
+        )
+        report = run_fix_eval(
+            cases, recorder or client, spec=pipeline, spec_path=spec_path, repo=repo
+        )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(report.to_markdown(), encoding="utf-8", newline="\n")
+    out.with_suffix(".json").write_text(
+        json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    if recorder and record:
+        recorder.save(record)
+        console.print(f"Recorded answers: {record}")
+    ok = sum(r.promoted for r in report.results)
+    console.print(f"fix success {ok}/{len(report.results)} ({report.success_rate:.1%})")
+    for role, (c, n) in report.by_role().items():
+        console.print(f"  {role}: {c}/{n}")
     console.print(f"Report: {out}")
 
 

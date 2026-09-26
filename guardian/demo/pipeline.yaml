@@ -15,12 +15,16 @@
 # `auto_diagnose: true` to a block to diagnose it automatically after a ROLLBACK
 # (needs GUARDIAN_LLM_PROVIDER and GUARDIAN_LLM_MODEL; it never fails a run).
 #
+# Every block declares its unit tests (`tests`): a proposed fix must pass them, plus a
+# shadow run, before the agent may open a pull request (`guardian propose <block>`).
+#
 # DAG roles (tests pick blocks by role, see tests/helpers/roles.py):
 #   source: b1   leaf: b7, b8   fallback_protected: b6   fallback_source: b5
 #   multi_dependent: b5   unprotected: b1-b5
 name: demo
 blocks:
   - name: b1_ingest
+    tests: ["tests/demo/test_block_contracts.py::test_block_contract[b1_ingest]"]
     load: demo.blocks:load_orders  # params go to the loader; versions get its frame
     versions:
       v1: demo.blocks:ingest
@@ -37,6 +41,7 @@ blocks:
       seed: 42
 
   - name: b2_parse
+    tests: ["tests/demo/test_block_contracts.py::test_block_contract[b2_parse]"]
     versions:
       v1: demo.blocks:parse
       v2: demo.blocks:parse_v2
@@ -48,6 +53,7 @@ blocks:
     quarantine_threshold: 0.2
 
   - name: b3_standardize
+    tests: ["tests/demo/test_block_contracts.py::test_block_contract[b3_standardize]"]
     fn: demo.blocks:standardize
     merge_key: [order_id]
     inputs: [b2_parse]
@@ -55,6 +61,7 @@ blocks:
     quarantine_threshold: 0.2
 
   - name: b4_clean
+    tests: ["tests/demo/test_block_contracts.py::test_block_contract[b4_clean]"]
     fn: demo.blocks:clean
     merge_key: [order_id]
     redact_columns: [email, email_clean]
@@ -63,6 +70,7 @@ blocks:
     quarantine_threshold: 0.2
 
   - name: b5_normalize
+    tests: ["tests/demo/test_block_contracts.py::test_block_contract[b5_normalize]"]
     versions:
       v1: demo.blocks:normalize
       v2: demo.blocks:normalize_v2
@@ -74,6 +82,7 @@ blocks:
     quarantine_threshold: 0.1
 
   - name: b6_enrich
+    tests: ["tests/demo/test_block_contracts.py::test_block_contract[b6_enrich]"]
     versions:
       v1: demo.blocks:enrich
       v2: demo.blocks:enrich_v2
@@ -85,6 +94,7 @@ blocks:
     quarantine_threshold: 0.1
 
   - name: b7_customers
+    tests: ["tests/demo/test_block_contracts.py::test_block_contract[b7_customers]"]
     versions:
       v1: demo.blocks:customers
       v2: demo.blocks:customers_v2
@@ -97,6 +107,7 @@ blocks:
     annotate_quality: true  # opt-in: adds _guardian_quality (FRESH/STALE/FALLBACK)
 
   - name: b8_aggregate
+    tests: ["tests/demo/test_block_contracts.py::test_block_contract[b8_aggregate]"]
     fn: demo.blocks:aggregate
     merge_key: [order_date, region, segment]
     inputs: [b6_enrich]

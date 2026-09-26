@@ -92,6 +92,8 @@ class ScenarioRunner(abc.ABC):
         # The auto-diagnosis hook the acting Guardian gets (as the CLI and the Dagster
         # definitions pass one); None, like a Guardian built without one.
         self.diagnoser: Callable[[Guardian, str, str], Any] | None = None
+        # Extra function references (e.g. a proposed version, as if its PR were merged).
+        self.registry: dict[str, Any] = {}
 
     # -------------------------------------------------------------- actions
 
@@ -125,7 +127,7 @@ class ScenarioRunner(abc.ABC):
 
     def _read(self, fn: Callable[[Guardian], Any]) -> Any:
         if self._reader is None:
-            self._reader = Guardian(self.spec, self.root)
+            self._reader = Guardian(self.spec, self.root, registry=self.registry)
         return fn(self._reader)
 
     def status(self, block: str) -> BlockStatus:
@@ -160,7 +162,8 @@ class ScenarioRunner(abc.ABC):
     def _faulted(self) -> tuple[PipelineSpec, dict[str, Any]]:
         """The spec with faults wrapping each block's live version."""
         active = self._read(lambda g: {b: g.active_version(b) for b in self.spec.block_names})
-        return apply_faults(self.spec, self.faults, active)
+        spec, registry = apply_faults(self.spec, self.faults, active)
+        return spec, {**self.registry, **registry}
 
     @contextmanager
     def _acting_guardian(self) -> Iterator[Guardian]:

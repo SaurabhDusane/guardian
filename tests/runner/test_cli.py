@@ -307,3 +307,64 @@ def test_diagnose_evidence_works_for_every_block(tmp_path, block) -> None:
         (tmp_path / "diagnoses" / block / "r2" / "evidence.json").read_text(encoding="utf-8")
     )
     assert evidence["block"] == block and evidence["items"][0]["id"] == "E1"
+
+
+def test_propose_command(tmp_path, project_repo) -> None:
+    from ..agent.helpers import answer, revert_fix
+    from ..helpers.project_repo import SPEC_REL
+    from ..helpers.roles import representative
+
+    spec_file = project_repo / SPEC_REL
+    pipeline = load_spec(spec_file)
+    block = representative(pipeline, "unprotected")
+    root = str(tmp_path / "store")
+    invoke("run", str(spec_file), "--root", root, "--run-id", "r1")
+    invoke("run", str(spec_file), "--root", root, "--run-id", "r2", "--fault", f"{block}:code_bug")
+    recorded = tmp_path / "recorded.json"
+    responses = {f"{block}/r2": answer("code_bug"), f"{block}/r2:fix": revert_fix(pipeline, block)}
+    recorded.write_text(json.dumps({"model": "rec", "responses": responses}), encoding="utf-8")
+
+    fake = ["--provider", "fake", "--fake-responses", str(recorded)]
+    result = invoke("propose", block, "--root", root, *fake)
+    assert result.exit_code == 0, result.output
+    assert "ready" in result.output and "new version: fix1" in result.output
+    assert "Dry run: GitHub was not touched" in result.output
+    assert (tmp_path / "store" / "proposals" / block / "r2" / "pr_body.md").exists()
+
+    result = invoke("propose", "no_such_block", "--root", root, *fake)
+    assert result.exit_code == 2 and "no_such_block" in result.output
+    result = runner.invoke(
+        app, ["propose", block, "--root", root], env={"GUARDIAN_LLM_PROVIDER": ""}
+    )
+    assert result.exit_code == 1 and "GUARDIAN_LLM_PROVIDER" in result.output
+
+
+def test_eval_fix_command(tmp_path, project_repo) -> None:
+    from ..agent.helpers import answer, revert_fix
+    from ..helpers.project_repo import SPEC_REL
+    from ..helpers.roles import representative
+
+    spec_file = project_repo / SPEC_REL
+    pipeline = load_spec(spec_file)
+    block = representative(pipeline, "leaf")
+    recorded = tmp_path / "recorded.json"
+    case = f"{block}:code_bug"
+    responses = {case: answer("code_bug"), f"{case}:fix": revert_fix(pipeline, block)}
+    recorded.write_text(json.dumps({"model": "rec", "responses": responses}), encoding="utf-8")
+    out = tmp_path / "bench" / "agent_fix_eval.md"
+    result = invoke(
+        "eval",
+        "fix",
+        str(spec_file),
+        "--block",
+        block,
+        "--out",
+        str(out),
+        "--provider",
+        "fake",
+        "--fake-responses",
+        str(recorded),
+    )
+    assert result.exit_code == 0, result.output
+    assert "fix success 1/1 (100.0%)" in result.output
+    assert "| fix success | 100.0% (1/1) |" in out.read_text(encoding="utf-8")

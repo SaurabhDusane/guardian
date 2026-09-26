@@ -1,4 +1,5 @@
-"""Evaluate the diagnosis agent on labeled faults, for every block of a spec.
+"""Evaluate the diagnosis agent on labeled faults, for every block of a spec, and its
+fixes on injected code bugs.
 
 ``generate_cases`` runs the pipeline once cleanly, then, for every block and every
 fault type, copies that state, injects the fault into the block, re-runs the block
@@ -18,6 +19,13 @@ rate of answers rejected for citing nonexistent evidence.
 Git history is left out of eval bundles: faults are injected at run time, not
 committed, so the source file's history would only reflect the state of the
 checkout the eval runs in.
+
+``run_fix_eval`` measures fixes: for every block's code_bug case, the agent diagnoses
+and proposes a fix (dry run, in a git worktree). A proposal succeeds when its new
+version then passes shadow promotion in that case's state: it is shadowed on a run
+where the live version is still buggy and promoted with an approval, as a human
+reviewer would do after merging. That approval is simulated by the eval harness,
+never by the agent.
 """
 
 from __future__ import annotations
@@ -31,7 +39,13 @@ from typing import Any
 
 import pandas as pd
 
-from guardian.agent.diagnose import BAD_CITATION, ROOT_CAUSES, Diagnosis, LLMClient, diagnose_bundle
+from guardian.agent.diagnose import (
+    BAD_CITATION,
+    ROOT_CAUSES,
+    Diagnosis,
+    LLMClient,
+    diagnose_bundle,
+)
 from guardian.agent.evidence import DEFAULT_SAMPLE_SIZE, EvidenceBundle, build_evidence
 from guardian.core.dag import ROLES, roles_of
 from guardian.core.guardian import Guardian
@@ -72,6 +86,8 @@ class EvalCase:
     fault_detail: str
     outcome: str  # the block's outcome on the faulted run
     bundle: EvidenceBundle = field(repr=False)
+    root: Path | None = field(default=None, repr=False, compare=False)  # the case's state
+    injected: Fault | None = field(default=None, repr=False, compare=False)
 
 
 def _clean_output(root: Path, block: str) -> pd.DataFrame:
@@ -125,10 +141,7 @@ def generate_cases(
         raise ValueError(f"unknown fault type(s) {unknown}; expected {list(FAULT_TYPES)}")
     for block in blocks or ():
         spec.block(block)  # KeyError for an unknown block
-    # The eval diagnoses cases itself; auto-diagnosis would only add noise.
-    spec = dataclasses.replace(
-        spec, blocks=tuple(dataclasses.replace(b, auto_diagnose=False) for b in spec.blocks)
-    )
+    spec = eval_spec(spec)
     workdir = Path(workdir)
     base_root = workdir / "baseline"
     if base_root.exists():
@@ -162,9 +175,18 @@ def generate_cases(
                     fault_detail=fault.name,
                     outcome=report.get(block).outcome.value,
                     bundle=bundle,
+                    root=case_root,
+                    injected=fault,
                 )
             )
     return cases
+
+
+def eval_spec(spec: PipelineSpec) -> PipelineSpec:
+    """The spec cases run with: the eval diagnoses cases itself, so no auto-diagnosis."""
+    return dataclasses.replace(
+        spec, blocks=tuple(dataclasses.replace(b, auto_diagnose=False) for b in spec.blocks)
+    )
 
 
 # ------------------------------------------------------------------ scoring
@@ -323,3 +345,155 @@ def run_eval(cases: Sequence[EvalCase], client: LLMClient) -> EvalReport:
         CaseResult(case, diagnose_bundle(case.bundle, client, key=case.case_id)) for case in cases
     ]
     return EvalReport(model=getattr(client, "model", "?"), results=results)
+
+
+# ------------------------------------------------------------------ fixes
+
+
+SHADOW_RUN = "eval-shadow"
+
+
+@dataclass(frozen=True)
+class FixResult:
+    case: EvalCase
+    diagnosed: str
+    proposal: str  # the proposal's status
+    promoted: bool  # the proposed version passed shadow promotion
+    reason: str
+
+
+@dataclass
+class FixEvalReport:
+    model: str
+    results: list[FixResult]
+
+    @property
+    def success_rate(self) -> float:
+        return sum(r.promoted for r in self.results) / len(self.results) if self.results else 0.0
+
+    def by_role(self) -> dict[str, tuple[int, int]]:
+        return {
+            role: (sum(r.promoted for r in members), len(members))
+            for role in ROLES
+            if (members := [r for r in self.results if role in r.case.roles])
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "cases": len(self.results),
+            "fix_success_rate": round(self.success_rate, 4),
+            "by_role": {k: list(v) for k, v in self.by_role().items()},
+            "results": [
+                {
+                    "case": r.case.case_id,
+                    "diagnosed": r.diagnosed,
+                    "proposal": r.proposal,
+                    "promoted": r.promoted,
+                    "reason": r.reason,
+                }
+                for r in self.results
+            ],
+        }
+
+    def to_markdown(self, title: str = "Fix agent eval") -> str:
+        ok = sum(r.promoted for r in self.results)
+        n = len(self.results)
+        lines = [
+            f"# {title}",
+            "",
+            f"Model: `{self.model}`. Cases: {n} (an injected code_bug in every block).",
+            "",
+            "A fix succeeds when the agent's proposed version passes its unit tests and a",
+            "shadow run, and then passes shadow promotion (with approval) while the buggy",
+            "version is still live.",
+            "",
+            "| metric | value |",
+            "|---|---|",
+            f"| fix success | {_pct(ok, n)} ({ok}/{n}) |",
+            "",
+            "## By DAG role",
+            "",
+            "| role | fix success |",
+            "|---|---|",
+        ]
+        for role, (c, m) in self.by_role().items():
+            lines.append(f"| {role} | {_pct(c, m)} ({c}/{m}) |")
+        lines += [
+            "",
+            "## Cases",
+            "",
+            "| case | diagnosed | proposal | promoted | reason |",
+            "|---|---|---|---|---|",
+        ]
+        for r in self.results:
+            reason = r.reason.replace("|", "\\|").replace("\n", " ")[:200]
+            lines.append(
+                f"| {r.case.case_id} | {r.diagnosed} | {r.proposal} | "
+                f"{'yes' if r.promoted else 'no'} | {reason} |"
+            )
+        return "\n".join(lines) + "\n"
+
+
+def run_fix_eval(
+    cases: Sequence[EvalCase],
+    client: LLMClient,
+    *,
+    spec: PipelineSpec,
+    spec_path: Path | str,
+    repo: Path | str | None = None,
+) -> FixEvalReport:
+    """Diagnose, propose (dry run) and try to promote a fix for every code_bug case.
+
+    ``spec`` is the spec the cases were generated from; ``spec_path`` the spec file in
+    the git repository the fixes are proposed against.
+    """
+    from guardian.agent.diagnose import diagnose
+    from guardian.agent.propose import propose
+
+    spec = eval_spec(spec)
+    results = []
+    for case in cases:
+        if case.fault != "code_bug":
+            continue
+        assert case.root is not None and case.injected is not None
+        faulted, registry = apply_faults(spec, {case.block: [case.injected]})
+        with Guardian(faulted, case.root, registry=registry) as g:
+            diagnosis = diagnose(
+                g, case.block, FAULT_RUN, client=client, key=case.case_id, git=False
+            ).diagnosis
+            proposal = propose(
+                g,
+                case.block,
+                FAULT_RUN,
+                client=client,
+                spec_path=spec_path,
+                repo=repo,
+                key=case.case_id,
+                git_history=False,
+            )
+        if proposal.ok:
+            promoted, reason = _simulate_reviewer(spec, case, proposal)
+        else:
+            promoted, reason = False, "; ".join(proposal.reasons)[:500]
+        results.append(FixResult(case, diagnosis.root_cause, proposal.status, promoted, reason))
+    return FixEvalReport(model=getattr(client, "model", "?"), results=results)
+
+
+def _simulate_reviewer(spec: PipelineSpec, case: EvalCase, proposal: Any) -> tuple[bool, str]:
+    """What a reviewer does after merging: shadow the new version while the buggy one
+    is still live, then promote it with approval. Runs only on the case's own copy."""
+    from guardian.agent.propose import with_proposed_version
+    from guardian.core.guardian import PromotionError
+
+    assert case.root is not None and case.injected is not None
+    merged, registry = with_proposed_version(spec, proposal)
+    faulted, fault_registry = apply_faults(merged, {case.block: [case.injected]})
+    with Guardian(faulted, case.root, registry={**registry, **fault_registry}) as g:
+        g.shadow_start(case.block, proposal.version)
+        Executor(g).run(SHADOW_RUN, only=[case.block])
+        try:
+            g.promote(case.block, approve=True, reason="eval: simulated reviewer approval")
+        except PromotionError as exc:
+            return False, str(exc)
+        return g.active_version(case.block) == proposal.version, "promoted"

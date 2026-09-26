@@ -57,3 +57,49 @@ def answer(root_cause: str = "code_bug", evidence: tuple[str, ...] = ("E1",), **
         **extra,
     }
     return json.dumps(payload)
+
+
+def live_function(spec: PipelineSpec, block: str) -> str:
+    """Name of the function behind the block's live version."""
+    b = spec.block(block)
+    return b.version_ref(b.active if b.versions else None).split(":")[1]
+
+
+def fix_answer(
+    action: str = "new_version",
+    name: str = "",
+    code: str = "",
+    evidence: tuple[str, ...] = ("E1",),
+    note: str = "",
+    dependent: str = "",
+) -> str:
+    return json.dumps(
+        {
+            "action": action,
+            "rationale": f"proposed {action}",
+            "evidence": list(evidence),
+            "name": name,
+            "code": code,
+            "note": note,
+            "dependent": dependent,
+        }
+    )
+
+
+def revert_fix(spec: PipelineSpec, block: str, evidence: tuple[str, ...] = ("E1",)) -> str:
+    """A new version that restores the last good logic (the repo's live function): the
+    right fix for an injected bad deploy."""
+    fn = live_function(spec, block)
+    code = f"def {fn}_fixed(*args, **kwargs):\n    return {fn}(*args, **kwargs)\n"
+    return fix_answer("new_version", f"{fn}_fixed", code, evidence)
+
+
+def broken_fix(spec: PipelineSpec, block: str) -> str:
+    """A new version that makes things worse: it drops the first output column."""
+    fn = live_function(spec, block)
+    code = (
+        f"def {fn}_broken(*args, **kwargs):\n"
+        f"    out = {fn}(*args, **kwargs)\n"
+        "    return out.drop(columns=list(out.columns)[:1])\n"
+    )
+    return fix_answer("new_version", f"{fn}_broken", code)

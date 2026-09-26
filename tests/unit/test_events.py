@@ -54,9 +54,10 @@ def test_always_logged_set_matches_contract() -> None:
     # CLAUDE.md: ERROR/ROLLBACK/REROUTE/QUARANTINE are never sampled out. WARN joins them
     # so warnings such as "replay merge skipped" cannot be sampled away.
     # PROMOTION joins them: every change of a block's active version must be auditable.
-    # DIAGNOSIS joins them: every (advisory) agent diagnosis must be auditable.
+    # DIAGNOSIS and PROPOSAL join them: every (advisory) agent action must be auditable.
     assert {k.value for k in ALWAYS_LOGGED} == {
         "DIAGNOSIS",
+        "PROPOSAL",
         "PROMOTION",
         "WARN",
         "ERROR",

@@ -6,21 +6,26 @@ not a fault-injection helper.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import numpy as np
 import pandas as pd
 
 
 def rewrite(
-    base: Callable[..., pd.DataFrame], rows: Callable[[int], np.ndarray]
+    base: Callable[..., pd.DataFrame],
+    rows: Callable[[int], np.ndarray],
+    columns: Sequence[str] | None = None,
 ) -> Callable[..., pd.DataFrame]:
-    """``base`` rewritten: same logic, then values in ``rows(n)`` are mishandled."""
+    """``base`` rewritten: same logic, then values in ``rows(n)`` (of ``columns``, default
+    all) are mishandled."""
 
     def block(*args: object, **kwargs: object) -> pd.DataFrame:
         out = base(*args, **kwargs).copy()
         selected = rows(len(out))
         for j, column in enumerate(out.columns):
+            if columns is not None and column not in columns:
+                continue
             values = out[column]
             if pd.api.types.is_bool_dtype(values):
                 continue
