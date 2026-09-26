@@ -101,10 +101,9 @@ defs.resolve_job_def("guardian_replay").execute_in_process(
 )
 ```
 
-With the Dagster UI (needs `dagster-webserver`, which the extra does not include):
+With the Dagster UI (`dagster-webserver` comes with the extra):
 
 ```bash
-uv pip install dagster-webserver
 GUARDIAN_ROOT=.guardian uv run dagster dev -m guardian.adapters.dagster.definitions
 ```
 

@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dagster = ["dagster>=1.8"]
+dagster = ["dagster>=1.8", "dagster-webserver>=1.8"]
 
 [project.scripts]
 guardian = "guardian.runner.cli:main"
