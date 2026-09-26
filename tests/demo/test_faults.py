@@ -9,6 +9,7 @@ from guardian.demo.faults import (
     crash,
     inject,
     null_burst,
+    parse_fault,
     pick_positions,
     schema_drift,
 )
@@ -75,3 +76,32 @@ def test_crash_and_inject(df) -> None:
     assert wrapped.__name__ == "fn"
     with pytest.raises(FaultInjected, match="boom"):
         inject(fn, crash("boom"))(df, k=1)
+
+
+@pytest.mark.parametrize(
+    "text,block,name",
+    [
+        ("b6_enrich:corrupt:0.5:region,segment", "b6_enrich", "corrupt_rows(0.5)"),
+        ("b4_clean:corrupt:0.1", "b4_clean", "corrupt_rows(0.1)"),
+        ("b6_enrich:null:segment:0.3", "b6_enrich", "null_burst(segment, 0.3)"),
+        ("b6_enrich:crash", "b6_enrich", "crash"),
+    ],
+)
+def test_parse_fault(text, block, name) -> None:
+    parsed_block, fault = parse_fault(text)
+    assert parsed_block == block and fault.name == name
+
+
+def test_parse_fault_drift(df) -> None:
+    _, drop = parse_fault("b:drop:x,s")
+    assert list(drop(df).columns) == ["n", "t"]
+    _, rename = parse_fault("b:rename:s=text")
+    assert "text" in rename(df).columns
+
+
+@pytest.mark.parametrize(
+    "text", ["b6", "b6:explode", "b6:corrupt:lots", "b6:crash:now", "b:rename:x"]
+)
+def test_parse_fault_rejects(text) -> None:
+    with pytest.raises(ValueError):
+        parse_fault(text)

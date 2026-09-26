@@ -28,7 +28,7 @@ from guardian.core.models import (
     ReplayResult,
 )
 from guardian.core.refs import load_ref
-from guardian.demo.faults import Fault, inject
+from guardian.demo.faults import Fault, apply_faults
 from guardian.runner.executor import Executor
 from guardian.runner.spec_loader import load_spec
 
@@ -136,16 +136,7 @@ class StandaloneRunner(ScenarioRunner):
     name = "standalone"
 
     def _faulted(self) -> tuple[PipelineSpec, dict[str, Any]]:
-        """Spec whose faulted blocks point at wrapped functions in a registry."""
-        registry: dict[str, Any] = {}
-        blocks = []
-        for block in self.spec.blocks:
-            if block.name in self.faults:
-                key = f"__faulted__:{block.name}"
-                registry[key] = inject(load_ref(block.fn), *self.faults[block.name])
-                block = dataclasses.replace(block, fn=key)
-            blocks.append(block)
-        return dataclasses.replace(self.spec, blocks=tuple(blocks)), registry
+        return apply_faults(self.spec, self.faults)
 
     @contextmanager
     def _acting_guardian(self) -> Iterator[Guardian]:

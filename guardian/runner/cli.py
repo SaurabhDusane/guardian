@@ -69,13 +69,27 @@ def _spec_for(root: Path, spec: Path | None) -> Path:
     raise typer.BadParameter("no --spec given and no previous `guardian run` in this root")
 
 
-def _open(root: Path, spec_path: Path, sample_rate: float = 1.0) -> Guardian:
+def _open(
+    root: Path, spec_path: Path, sample_rate: float = 1.0, faults: list[str] | None = None
+) -> Guardian:
     try:
         spec = load_spec(spec_path)
     except SpecError as exc:
         console.print(f"[red]Invalid spec:[/red] {exc}")
         raise typer.Exit(code=2) from exc
-    return Guardian(spec, root, sample_rate=sample_rate)
+    registry: dict = {}
+    if faults:
+        from guardian.demo.faults import apply_faults, parse_fault
+
+        by_block: dict[str, list] = {}
+        try:
+            for text in faults:
+                block, fault = parse_fault(text)
+                by_block.setdefault(block, []).append(fault)
+            spec, registry = apply_faults(spec, by_block)
+        except (KeyError, ValueError) as exc:
+            raise typer.BadParameter(str(exc), param_hint="--fault") from exc
+    return Guardian(spec, root, sample_rate=sample_rate, registry=registry)
 
 
 @app.command()
@@ -86,10 +100,16 @@ def run(
     sample_rate: float = typer.Option(
         1.0, "--sample-rate", min=0.0, max=1.0, help="Sample rate for routine events."
     ),
+    fault: list[str] | None = typer.Option(
+        None,
+        "--fault",
+        help="Inject a fault for this run (repeatable), e.g. b6_enrich:corrupt:0.5:region "
+        "or b6_enrich:crash. Forms: corrupt, null, drop, rename, crash.",
+    ),
 ) -> None:
     """Run a pipeline spec end to end and print a per-block summary."""
     spec_path = find_spec(spec)
-    with _open(root, spec_path, sample_rate) as g:
+    with _open(root, spec_path, sample_rate, fault) as g:
         report = Executor(g).run(run_id)
         _save_state(root, spec_path)
         console.print(render_report(report))

@@ -7,12 +7,17 @@ seeded and takes exactly ``round(fraction * n)`` rows, so tests can assert count
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 import pandas as pd
+
+from guardian.core.models import PipelineSpec
+from guardian.core.refs import load_ref
 
 CORRUPT_TEXT = "__corrupt__"
 CORRUPT_NUMBER = -999_999
@@ -117,3 +122,55 @@ def inject(fn: Callable[..., pd.DataFrame], *faults: Fault) -> Callable[..., pd.
 
     faulty.faults = faults  # type: ignore[attr-defined]
     return faulty
+
+
+def apply_faults(
+    spec: PipelineSpec, faults: Mapping[str, Sequence[Fault]]
+) -> tuple[PipelineSpec, dict[str, Any]]:
+    """Return a spec whose faulted blocks call wrapped functions, plus their registry.
+
+    Pass both to ``Guardian(spec, root, registry=registry)``. Unfaulted blocks are
+    unchanged, and snapshots/quarantine keep the real block names.
+    """
+    registry: dict[str, Any] = {}
+    blocks = []
+    for block in spec.blocks:
+        if faults.get(block.name):
+            key = f"__faulted__:{block.name}"
+            registry[key] = inject(load_ref(block.fn), *faults[block.name])
+            block = dataclasses.replace(block, fn=key)
+        blocks.append(block)
+    unknown = set(faults) - set(spec.block_names)
+    if unknown:
+        raise KeyError(f"cannot inject faults into unknown block(s) {sorted(unknown)}")
+    return dataclasses.replace(spec, blocks=tuple(blocks)), registry
+
+
+FAULT_SYNTAX = (
+    "BLOCK:corrupt:FRACTION[:COL,COL]  |  BLOCK:null:COLUMN:FRACTION  |  "
+    "BLOCK:drop:COL[,COL]  |  BLOCK:rename:OLD=NEW  |  BLOCK:crash"
+)
+
+
+def parse_fault(text: str, seed: int = 0) -> tuple[str, Fault]:
+    """Parse a command-line fault such as ``b6_enrich:corrupt:0.5:region,segment``."""
+    parts = text.split(":")
+    if len(parts) < 2:
+        raise ValueError(f"bad fault {text!r}; expected {FAULT_SYNTAX}")
+    block, kind, args = parts[0], parts[1], parts[2:]
+    try:
+        if kind == "corrupt" and len(args) in (1, 2):
+            columns = args[1].split(",") if len(args) == 2 else None
+            return block, corrupt_rows(float(args[0]), columns=columns, seed=seed)
+        if kind == "null" and len(args) == 2:
+            return block, null_burst(args[0], float(args[1]), seed=seed)
+        if kind == "drop" and len(args) == 1:
+            return block, schema_drift(drop=args[0].split(","))
+        if kind == "rename" and len(args) == 1 and "=" in args[0]:
+            old, new = args[0].split("=", 1)
+            return block, schema_drift(rename={old: new})
+        if kind == "crash" and not args:
+            return block, crash(f"injected crash in {block}")
+    except ValueError as exc:
+        raise ValueError(f"bad fault {text!r}: {exc}") from exc
+    raise ValueError(f"bad fault {text!r}; expected {FAULT_SYNTAX}")

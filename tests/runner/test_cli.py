@@ -49,3 +49,17 @@ def test_set_status_rejects_degraded(tmp_path) -> None:
     invoke("run", "demo/pipeline.yaml", "--root", root)
     result = invoke("set-status", "b6_enrich", "DEGRADED", "--root", root)
     assert result.exit_code == 2
+
+
+def test_run_with_fault_reroutes(tmp_path) -> None:
+    root = str(tmp_path)
+    result = invoke(
+        "run", "demo/pipeline.yaml", "--root", root, "--fault", "b6_enrich:corrupt:0.5:region"
+    )
+    assert result.exit_code == 0, result.output
+    assert "ROLLBACK" in result.output and "fallback for b6_enrich" in result.output
+
+
+def test_run_with_bad_fault(tmp_path) -> None:
+    result = invoke("run", "demo/pipeline.yaml", "--root", str(tmp_path), "--fault", "nope:crash")
+    assert result.exit_code != 0
