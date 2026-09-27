@@ -1,6 +1,6 @@
 # Test suite timings: before
 
-Baseline before the Phase 13 speed-up: the whole suite in one serial `uv run pytest`
+Baseline before the test-suite speed-up: the whole suite in one serial `uv run pytest`
 (the default run at the time: no markers, no xdist) on the development container
 (4 CPUs), with the dagster, agent and observability extras installed.
 
