@@ -23,7 +23,6 @@ import sys
 import urllib.request
 import uuid
 from collections.abc import Callable
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -68,10 +67,6 @@ def run_uuid(*parts: str) -> str:
 
 def _facet(schema: str, **fields: Any) -> dict[str, Any]:
     return {"_producer": PRODUCER, "_schemaURL": schema, **fields}
-
-
-def _time(ts: datetime) -> str:
-    return ts.isoformat()
 
 
 # ------------------------------------------------------------------ transports
@@ -164,7 +159,7 @@ class OpenLineageEmitter:
     def _base(self, event_type: str, event: Event, job: str, run_id: str) -> dict[str, Any]:
         return {
             "eventType": event_type,
-            "eventTime": _time(event.ts),
+            "eventTime": event.ts.isoformat(),
             "producer": PRODUCER,
             "schemaURL": SCHEMA_URL,
             "run": {"runId": run_id, "facets": {}},

@@ -264,7 +264,7 @@ class GitHubClient:
         self, token: str, *, api: str = DEFAULT_GITHUB_API, transport: Transport | None = None
     ) -> None:
         if not token:
-            raise GuardianError("no GitHub token")
+            raise GuardianError("GitHubClient needs a non-empty token")
         self._token = token
         self._api = api.rstrip("/")
         self._transport = transport or urllib_transport

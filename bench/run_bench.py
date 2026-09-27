@@ -56,6 +56,7 @@ from typing import Any
 import pandas as pd
 import yaml
 
+from guardian.agent.eval import git_commit
 from guardian.core.dag import blocks_by_role, dependents
 from guardian.core.events import EventKind
 from guardian.core.guardian import Guardian
@@ -587,14 +588,6 @@ def derive(series: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------- environment
 
 
-def git(*args: str) -> str | None:
-    try:
-        done = subprocess.run(["git", *args], cwd=REPO, capture_output=True, text=True, check=True)
-    except (OSError, subprocess.CalledProcessError):
-        return None
-    return done.stdout.strip()
-
-
 def machine() -> dict[str, Any]:
     packages = ["pandas", "pyarrow", "duckdb", "pandera", "numpy", "opentelemetry-sdk"]
     versions = {}
@@ -741,7 +734,7 @@ def main(argv: list[str] | None = None) -> int:
     raw = raw_spec()
     blocks = pick_blocks(to_spec(raw))
     columns = derived_columns(to_spec(scaled(raw, 2_000, clean=True)), blocks.versioned)
-    status = git("status", "--porcelain", "--untracked-files=no")
+    commit, dirty = git_commit(REPO)
     meta = {
         "command": " ".join(["python", "bench/run_bench.py", *sys.argv[1:]]),
         "quick": args.quick,
@@ -754,8 +747,8 @@ def main(argv: list[str] | None = None) -> int:
         "sample_rate": SAMPLE_RATE,
         "quarantine_fractions": list(QUARANTINE_FRACTIONS),
         "measurements": args.only,
-        "git_commit": git("rev-parse", "HEAD"),
-        "git_dirty": bool(status) if status is not None else None,
+        "git_commit": commit,
+        "git_dirty": dirty,
         "machine": machine(),
     }
     log(f"blocks by role: {blocks.as_dict()}")

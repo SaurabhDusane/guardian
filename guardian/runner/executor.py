@@ -89,7 +89,7 @@ class Executor:
         if only is not None:
             unknown = sorted(set(only) - set(self.order))
             if unknown:
-                raise KeyError(f"unknown block(s) {unknown}")
+                raise KeyError(f"unknown block(s) {unknown}; the spec's blocks: {list(self.order)}")
             selected = [b for b in self.order if b in set(only)]
         report = RunReport(run_id=run_id, pipeline=g.spec.name)
         g.events.emit(EventKind.RUN_STARTED, run_id=run_id, pipeline=g.spec.name)

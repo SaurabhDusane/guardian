@@ -309,7 +309,10 @@ class PipelineSpec:
         for b in self.blocks:
             if b.name == name:
                 return b
-        raise KeyError(f"pipeline {self.name!r} has no block {name!r}")
+        raise KeyError(
+            f"pipeline {self.name!r} has no block {name!r}; "
+            f"its blocks: {', '.join(self.block_names)}"
+        )
 
     def dependents(self, name: str) -> tuple[BlockSpec, ...]:
         return tuple(b for b in self.blocks if name in b.inputs)

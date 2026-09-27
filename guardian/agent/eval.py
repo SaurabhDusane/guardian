@@ -111,7 +111,6 @@ class EvalCase:
     fault: str
     label: str
     roles: tuple[str, ...]
-    fault_detail: str
     outcome: str  # the block's outcome on the faulted run
     bundle: EvidenceBundle = field(repr=False)
     root: Path | None = field(default=None, repr=False, compare=False)  # the case's state
@@ -240,7 +239,6 @@ def generate_cases(
                 fault=fault_type,
                 label=EXPECTED[fault_type],
                 roles=tuple(roles_of(spec, block)),
-                fault_detail=fault.name,
                 outcome=report.get(block).outcome.value,
                 bundle=bundle,
                 root=case_root,

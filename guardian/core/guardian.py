@@ -1304,7 +1304,10 @@ def _bad_mask(df: pd.DataFrame, result: ValidationResult) -> Any:
         mask[list(result.bad_positions)] = True
         return mask
     if not df.index.is_unique:
-        raise ValueError("validator did not report bad_positions and the index is not unique")
+        raise ValueError(
+            "the validator reported no bad_positions and the frame's index is not unique: "
+            "return bad_positions from the validator, or give the block output a unique index"
+        )
     return df.index.isin(result.bad.index)
 
 
