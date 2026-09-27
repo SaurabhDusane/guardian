@@ -17,3 +17,6 @@ dist/
 .mypy_cache/
 .coverage
 htmlcov/
+
+# Test reports (CI writes JUnit XML here)
+reports/
