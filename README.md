@@ -1382,28 +1382,44 @@ have their own scenarios. The demo spec contains every role;
 
 ## Results
 
-Demo pipeline at 100,000 generated rows, 5 runs per configuration, measured before
-`b7_customers` was added to the demo (so the pipeline had 7 blocks), on a 4-core Intel Xeon
-@ 2.10 GHz cloud container (Python 3.11, pandas 3.0, DuckDB 1.5). The figures are medians
-with the min to max range. Full details, machine specs and raw samples are in
-[`bench/results.md`](bench/results.md); reproduce with `uv run python bench/run_bench.py`
-(`--rows`, `--reps`).
+The table below is filled in by `bench/update_readme.py` from `bench/results.json`, the
+raw output of `bench/run_bench.py`; nothing between the markers is typed by hand. Full
+details (IQRs, every sample, machine specs, the blocks used and the methodology) are in
+[`bench/results.md`](bench/results.md).
 
-| Metric | Setup | Result |
-|---|---|---|
-| Throughput during outage | Rows/s through the whole pipeline while b6 crashes on every run and b8 is rerouted to b5, vs. a clean run. The same 87,517 rows reach b8 in both. | **23,362 rows/s** during the outage (22,322 to 23,648) vs. **22,358 rows/s** clean (22,150 to 22,620): **104%** of the clean run. There is no throughput penalty; b6's own work is skipped. |
-| Recovery time | Time for `replay b6_enrich` after a heavy-corruption outage (87,517 quarantined rows), until b6 is HEALTHY with the upserted snapshot promoted. | **2.55 s** in-process (2.47 to 2.60). **3.72 s** via the CLI (3.68 to 4.36), which includes starting Python and importing pandas, Pandera, pyarrow and DuckDB. |
-| Logging overhead | The same blocks on clean data, with Guardian at event sample rate 1.0 and 0.1, vs. a bare run without Guardian. | Bare **2.67 s**. Guardian **3.41 s** at 1.0 and **3.41 s** at 0.1, so **+28%** in total (validation, Parquet snapshots, bookkeeping). The logging share (1.0 vs. 0.1) is **+1 ms**, below the ±73 ms run-to-run spread. A run emits only 36 events, per block and decision rather than per row. |
+<!-- bench-results:start -->
+_No results recorded yet for the current benchmark._ Run it on the machine you want to
+quote, then fill in this table:
 
-**Reading the numbers**
-- **Outage throughput:** reading b5 through the adapter costs no more than running b6, so
-  the pipeline delivers at full speed during the outage. What degrades is data richness
-  (segments are `unassigned`), not throughput.
-- **Recovery:** replaying about 88k rows is a few seconds, dominated by re-running b6 and
-  validating the recovered rows.
-- **Overhead:** Guardian's cost comes from validation and snapshots, not from logging.
-  At this event volume the sample rate hardly matters; it would start to matter only with
-  far more blocks or with per-row events.
+```bash
+uv sync --extra observability
+uv run python bench/run_bench.py              # 10k, 100k and 1M rows, 5 repeats each
+uv run python bench/update_readme.py
+```
+<!-- bench-results:end -->
+
+**What the rows measure** (every block is chosen by DAG role, never by name):
+- **Overhead** of one pipeline run on clean data over (a), the bare block functions
+  in topological order. (b) is Guardian's core (validation, Parquet snapshots,
+  quarantine, events sampled at 0.1) with provenance switched off. (c) adds provenance.
+  (d) adds both exporters: OpenLineage to a file and OpenTelemetry to an in-memory
+  exporter.
+- **Throughput** in generated rows per second of pipeline wall time, on the demo's messy
+  data. It compares a clean run with a run where the fallback-protected block crashes
+  (its consumer reads the fallback source through the adapter) and a run where an
+  unprotected block crashes (its dependents read its stale last-good snapshot).
+- **Recovery** is the wall time of `guardian shadow promote <block> --approve`, run as its
+  own process, until the block is HEALTHY on the candidate version with its quarantine
+  replayed. It is measured with 1%, 10% and 50% of the block's rows quarantined. The
+  floor row is the time `guardian status` takes on the same storage (process start and
+  imports), which every CLI command pays.
+- **Shadow cost** is one run with a block's candidate version in shadow vs. the same run
+  with no shadow.
+
+`uv run python bench/run_bench.py --quick` (10k rows, 2 repeats, about 2 minutes) is a
+sanity check. It writes `bench/results-quick.*`, which is not committed, and
+`update_readme.py` refuses to use it. Other options: `--scales 10000 100000`,
+`--repeats N`, `--only overhead throughput recovery shadow`.
 
 ## Development
 
@@ -1480,7 +1496,8 @@ guardian/
   demo/        data_gen, schemas, blocks, faults, refactor (code_bug), pipeline.yaml
 observability/  docker-compose with Marquez, Tempo and Grafana for local viewing
 bench/
-  run_bench.py throughput / recovery / overhead benchmarks -> bench/results.md
+  run_bench.py  overhead / throughput / recovery / shadow benchmarks -> results.json, results.md
+  update_readme.py  README Results table <- results.json
   agent_eval.md  written by `guardian eval diagnose` (real model; manual)
   agent_fix_eval.md  written by `guardian eval fix` (real model; manual)
   test_timings_before.md / test_timings_after.md  test suite profiling (Phase 13)

@@ -20,3 +20,6 @@ htmlcov/
 
 # Test reports (CI writes JUnit XML here)
 reports/
+
+# Benchmark sanity-check output (bench/run_bench.py --quick)
+bench/results-quick.*
