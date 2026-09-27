@@ -16,9 +16,13 @@ from rich.tree import Tree
 import guardian as guardian_pkg
 from guardian.agent.diagnose import (
     ACCEPTED,
+    ENV_MODEL,
+    ENV_PROVIDER,
     FAILED,
     DiagnosisResult,
+    LLMClient,
     LLMConfig,
+    LLMConfigError,
     auto_diagnoser,
     diagnose,
     make_client,
@@ -779,6 +783,247 @@ eval_app = typer.Typer(help="Evaluate Guardian's agents.", no_args_is_help=True)
 app.add_typer(eval_app, name="eval")
 
 
+RealOption = typer.Option(
+    False,
+    "--real",
+    help="Call the real model (costs money). Needs GUARDIAN_LLM_MODEL and the API key "
+    "variable (ANTHROPIC_API_KEY, or the one named by GUARDIAN_LLM_API_KEY_ENV).",
+)
+DryRunOption = typer.Option(
+    False, "--dry-run", help="Print the cases, estimated tokens and cost, then exit."
+)
+MaxCasesOption = typer.Option(
+    None, "--max-cases", min=1, help="Evaluate a seeded sample of at most N cases."
+)
+RolesOption = typer.Option(
+    None, "--roles", help="Only blocks with one of these DAG roles (repeatable or comma-separated)."
+)
+SeedOption = typer.Option(0, "--seed", help="Seed for fault injection and --max-cases sampling.")
+RepeatsOption = typer.Option(
+    1, "--repeats", min=1, help="Run every case K times and report agreement across repeats."
+)
+NoCacheOption = typer.Option(
+    False, "--no-cache", help="Ignore cached answers and call the model again (still stores them)."
+)
+CacheDirOption = typer.Option(
+    None,
+    "--cache-dir",
+    help="Response cache (default with --real: $GUARDIAN_LLM_CACHE_DIR or .guardian/llm-cache).",
+)
+PriceInputOption = typer.Option(
+    None,
+    "--price-input",
+    help="USD per million input tokens (default: $GUARDIAN_LLM_PRICE_INPUT_PER_MTOK).",
+)
+PriceOutputOption = typer.Option(
+    None,
+    "--price-output",
+    help="USD per million output tokens (default: $GUARDIAN_LLM_PRICE_OUTPUT_PER_MTOK).",
+)
+ExpectedOutputOption = typer.Option(
+    None,
+    "--expected-output-tokens",
+    min=1,
+    help="Dry run: expected output tokens per call, thinking included "
+    "(default: $GUARDIAN_LLM_EST_OUTPUT_TOKENS or 2000).",
+)
+ENV_EST_OUTPUT_TOKENS = "GUARDIAN_LLM_EST_OUTPUT_TOKENS"
+DEFAULT_EST_OUTPUT_TOKENS = 2000
+
+
+def _split(values: list[str] | None) -> list[str]:
+    return [v.strip() for item in values or () for v in item.split(",") if v.strip()]
+
+
+def _eval_client(real: bool, config: LLMConfig) -> LLMClient:
+    """The real client only with --real; otherwise only a fake (recorded) one."""
+    from guardian.agent.diagnose import REAL_PROVIDERS, make_real_client
+
+    if real:
+        return make_real_client(config)
+    if config.provider in REAL_PROVIDERS:
+        raise LLMConfigError(
+            f"{ENV_PROVIDER}={config.provider} calls a real, paid model: pass --real to "
+            "confirm (and --dry-run first to see the estimated cost)"
+        )
+    if config.provider is None:
+        raise LLMConfigError(
+            "no model selected: pass --real to call the real model (needs "
+            f"{ENV_MODEL} and {config.api_key_env}), or use recorded answers with "
+            f"--provider fake --fake-responses FILE (or {ENV_PROVIDER}=fake)"
+        )
+    return make_client(config)
+
+
+def _run_eval_command(
+    command: str,
+    *,
+    spec: Path,
+    out: Path,
+    workdir: Path | None,
+    blocks: list[str] | None,
+    roles: list[str] | None,
+    faults: list[str] | None,
+    max_cases: int | None,
+    seed: int,
+    repeats: int,
+    real: bool,
+    dry_run: bool,
+    no_cache: bool,
+    cache_dir: Path | None,
+    price_input: float | None,
+    price_output: float | None,
+    expected_output: int | None,
+    record: Path | None,
+    provider: str | None,
+    model: str | None,
+    fake_responses: Path | None,
+    repo: Path | None = None,
+) -> None:
+    import os
+    import tempfile
+
+    from guardian.agent import eval as agent_eval
+    from guardian.agent.diagnose import FakeClient, RecordingClient
+    from guardian.agent.metering import MeteredClient, Prices, ResponseCache, default_cache_dir
+
+    spec_path = find_spec(spec)
+    try:
+        pipeline = load_spec(spec_path)
+        prices = Prices.from_env(input_per_mtok=price_input, output_per_mtok=price_output)
+        fault_types = ["code_bug"] if command == "propose" else _split(faults) or None
+        if command == "propose" and _split(faults) not in ([], ["code_bug"]):
+            raise ValueError("eval propose runs on code_bug cases only")
+        pairs = agent_eval.plan_cases(
+            pipeline,
+            blocks=blocks or None,
+            roles=_split(roles) or None,
+            faults=fault_types or agent_eval.FAULT_TYPES,
+            max_cases=max_cases,
+            seed=seed,
+        )
+    except SpecError as exc:
+        console.print(f"[red]Invalid spec:[/red] {escape(str(exc))}")
+        raise typer.Exit(code=2) from exc
+    except (KeyError, ValueError) as exc:
+        console.print(f"[red]{escape(str(exc.args[0] if exc.args else exc))}[/red]")
+        raise typer.Exit(code=2) from exc
+    config = _llm_config(provider, model, fake_responses)
+    cache = None
+    if cache_dir is not None or real or dry_run:
+        cache = ResponseCache(cache_dir or default_cache_dir())
+    client: LLMClient | None = None
+    if not dry_run:
+        try:
+            client = _eval_client(real, config)
+        except GuardianError as exc:
+            console.print(f"[red]{escape(str(exc))}[/red]")
+            raise typer.Exit(code=1) from exc
+    if not pairs:
+        console.print("[red]No cases match the filters.[/red]")
+        raise typer.Exit(code=2)
+
+    filters = {
+        "blocks": blocks or [],
+        "roles": _split(roles),
+        "faults": fault_types or [],
+        "max_cases": max_cases,
+    }
+    with tempfile.TemporaryDirectory(prefix=f"guardian-eval-{command}-") as tmp:
+        console.print(f"Generating {len(pairs)} case(s) (seed {seed})...")
+        cases = agent_eval.generate_cases(pipeline, workdir or Path(tmp), pairs=pairs, seed=seed)
+        if dry_run:
+            expected = expected_output or int(
+                os.environ.get(ENV_EST_OUTPUT_TOKENS) or DEFAULT_EST_OUTPUT_TOKENS
+            )
+            dry_model = config.model
+            if config.provider == "fake" and config.fake_responses:
+                dry_model = FakeClient.from_file(config.fake_responses).model
+            common = dict(
+                model=dry_model,
+                repeats=repeats,
+                cache=cache,
+                read_cache=not no_cache,
+                expected_output=expected,
+                max_tokens=config.max_tokens,
+                prices=prices,
+            )
+            if command == "diagnose":
+                estimate = agent_eval.estimate_diagnose(cases, **common)
+            else:
+                estimate = agent_eval.estimate_propose(
+                    cases, spec_path=spec_path, repo=repo, **common
+                )
+            for line in estimate.lines():
+                console.print(escape(line))
+            return
+        assert client is not None
+        recorder = RecordingClient(client) if record else None
+        metered = MeteredClient(recorder or client, cache=cache, read_cache=not no_cache)
+        meta = agent_eval.run_meta(
+            model=client.model,
+            real=real,
+            cases=len(cases),
+            repeats=repeats,
+            seed=seed,
+            filters=filters,
+            repo=spec_path.parent,
+        )
+        console.print(
+            f"{'Diagnosing' if command == 'diagnose' else 'Proposing fixes for'} "
+            f"{len(cases)} case(s) x {repeats} with model {escape(client.model)}"
+            + (" (real model)" if real else "")
+            + "..."
+        )
+        report: agent_eval.EvalReport | agent_eval.FixEvalReport
+        if command == "diagnose":
+            report = agent_eval.run_eval(cases, metered, repeats=repeats, prices=prices, meta=meta)
+        else:
+            report = agent_eval.run_fix_eval(
+                cases,
+                metered,
+                spec=pipeline,
+                spec_path=spec_path,
+                repo=repo,
+                repeats=repeats,
+                prices=prices,
+                meta=meta,
+            )
+    agent_eval.write_report(out, command, report.to_dict())
+    if recorder and record:
+        recorder.save(record)
+        console.print(f"Recorded answers: {record}")
+    data = report.to_dict()
+    if isinstance(report, agent_eval.EvalReport):
+        correct = sum(r.correct for r in report.results)
+        console.print(
+            f"accuracy {correct}/{len(report.results)} ({report.accuracy:.1%}); "
+            f"rejected for bad citations: {report.rejected}/{len(report.results)}"
+        )
+        for fault, (c, n) in report.by_fault().items():
+            console.print(f"  {fault}: {c}/{n}")
+    else:
+        ok = sum(r.promoted for r in report.results)
+        console.print(f"fix success {ok}/{len(report.results)} ({report.success_rate:.1%})")
+        for role, (c, n) in report.by_role().items():
+            console.print(f"  {role}: {c}/{n}")
+        for reason, n in report.failures().items():
+            console.print(f"  failed: {escape(reason)}: {n}")
+    usage = data["usage"]
+    cost = usage["cost_usd"]
+    console.print(
+        f"LLM calls: {usage['calls']} ({usage['cached_calls']} cached); tokens in/out "
+        f"{usage['input_tokens']:,}/{usage['output_tokens']:,}"
+        + (" (estimated)" if usage["tokens_estimated"] else "")
+        + (
+            f"; cost ${cost:,.4f} (this run ${usage['billed_cost_usd']:,.4f})"
+            if cost is not None
+            else ""
+        )
+    )
+    console.print(f"Report: {out} (and {out.with_suffix('.json')})")
+
+
 @eval_app.command("diagnose")
 def eval_diagnose_cmd(
     spec: Path = typer.Argument(Path("demo/pipeline.yaml"), help="Pipeline spec to evaluate on."),
@@ -789,9 +1034,27 @@ def eval_diagnose_cmd(
         None, "--workdir", help="Keep the cases' state here (default: a temporary directory)."
     ),
     blocks: list[str] | None = typer.Option(None, "--block", help="Only these blocks."),
-    faults: list[str] | None = typer.Option(None, "--fault-type", help="Only these fault types."),
+    roles: list[str] | None = RolesOption,
+    faults: list[str] | None = typer.Option(
+        None,
+        "--faults",
+        "--fault-type",
+        help="Only these fault types (repeatable or comma-separated).",
+    ),
+    max_cases: int | None = MaxCasesOption,
+    seed: int = SeedOption,
+    repeats: int = RepeatsOption,
+    real: bool = RealOption,
+    dry_run: bool = DryRunOption,
+    no_cache: bool = NoCacheOption,
+    cache_dir: Path | None = CacheDirOption,
+    price_input: float | None = PriceInputOption,
+    price_output: float | None = PriceOutputOption,
+    expected_output: int | None = ExpectedOutputOption,
     record: Path | None = typer.Option(
-        None, "--record", help="Save the model's answers, for replay with --provider fake."
+        None,
+        "--record",
+        help="Save the answers of the calls made, for replay with --provider fake.",
     ),
     provider: str | None = ProviderOption,
     model: str | None = ModelOption,
@@ -799,115 +1062,69 @@ def eval_diagnose_cmd(
 ) -> None:
     """Diagnose a labeled fault for every block x fault type and score the answers.
 
-    Uses the configured (real) model unless --provider fake is given.
+    Uses recorded answers (--provider fake) unless --real is given.
     """
-    import tempfile
-
-    from guardian.agent.diagnose import RecordingClient
-    from guardian.agent.eval import FAULT_TYPES, generate_cases, run_eval
-
-    spec_path = find_spec(spec)
-    try:
-        pipeline = load_spec(spec_path)
-        client = make_client(_llm_config(provider, model, fake_responses))
-    except SpecError as exc:
-        console.print(f"[red]Invalid spec:[/red] {exc}")
-        raise typer.Exit(code=2) from exc
-    except GuardianError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(code=1) from exc
-    recorder = RecordingClient(client) if record else None
-    with tempfile.TemporaryDirectory(prefix="guardian-eval-") as tmp:
-        try:
-            cases = generate_cases(
-                pipeline,
-                workdir or Path(tmp),
-                blocks=blocks or None,
-                faults=faults or FAULT_TYPES,
-            )
-        except (KeyError, ValueError) as exc:
-            console.print(f"[red]{exc.args[0] if exc.args else exc}[/red]")
-            raise typer.Exit(code=2) from exc
-        console.print(f"Diagnosing {len(cases)} case(s) with model {escape(client.model)}...")
-        report = run_eval(cases, recorder or client)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(report.to_markdown(), encoding="utf-8", newline="\n")
-    out.with_suffix(".json").write_text(
-        json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    if recorder and record:
-        recorder.save(record)
-        console.print(f"Recorded answers: {record}")
-    correct = sum(r.correct for r in report.results)
-    console.print(
-        f"accuracy {correct}/{len(report.results)} ({report.accuracy:.1%}); "
-        f"rejected for bad citations: {report.rejected}/{len(report.results)}"
-    )
-    for fault, (c, n) in report.by_fault().items():
-        console.print(f"  {fault}: {c}/{n}")
-    console.print(f"Report: {out}")
+    _run_eval_command(
+        "diagnose", spec=spec, out=out, workdir=workdir, blocks=blocks, roles=roles,
+        faults=faults, max_cases=max_cases, seed=seed, repeats=repeats, real=real,
+        dry_run=dry_run, no_cache=no_cache, cache_dir=cache_dir, price_input=price_input,
+        price_output=price_output, expected_output=expected_output, record=record,
+        provider=provider, model=model, fake_responses=fake_responses,
+    )  # fmt: skip
 
 
-@eval_app.command("fix")
-def eval_fix_cmd(
+def eval_propose_cmd(
     spec: Path = typer.Argument(Path("demo/pipeline.yaml"), help="Pipeline spec to evaluate on."),
     out: Path = typer.Option(
-        Path("bench") / "agent_fix_eval.md", "--out", help="Markdown report (a .json goes next)."
+        Path("bench") / "agent_eval.md", "--out", help="Markdown report (a .json goes next to it)."
+    ),
+    workdir: Path | None = typer.Option(
+        None, "--workdir", help="Keep the cases' state here (default: a temporary directory)."
     ),
     repo: Path | None = typer.Option(
         None, "--repo", help="Git repository to propose fixes against (default: the spec's)."
     ),
     blocks: list[str] | None = typer.Option(None, "--block", help="Only these blocks."),
+    roles: list[str] | None = RolesOption,
+    faults: list[str] | None = typer.Option(
+        None, "--faults", "--fault-type", help="Accepted for symmetry; only code_bug is valid."
+    ),
+    max_cases: int | None = MaxCasesOption,
+    seed: int = SeedOption,
+    repeats: int = RepeatsOption,
+    real: bool = RealOption,
+    dry_run: bool = DryRunOption,
+    no_cache: bool = NoCacheOption,
+    cache_dir: Path | None = CacheDirOption,
+    price_input: float | None = PriceInputOption,
+    price_output: float | None = PriceOutputOption,
+    expected_output: int | None = ExpectedOutputOption,
     record: Path | None = typer.Option(
-        None, "--record", help="Save the model's answers, for replay with --provider fake."
+        None,
+        "--record",
+        help="Save the answers of the calls made, for replay with --provider fake.",
     ),
     provider: str | None = ProviderOption,
     model: str | None = ModelOption,
     fake_responses: Path | None = FakeResponsesOption,
 ) -> None:
-    """Fix success: inject a code bug into every block, let the agent diagnose and propose
-    a fix (dry run), and check that the fix passes shadow promotion."""
-    import tempfile
+    """Score the agent's fixes for injected code bugs (dry run, never GitHub).
 
-    from guardian.agent.diagnose import RecordingClient
-    from guardian.agent.eval import generate_cases, run_fix_eval
+    For every code_bug case the agent diagnoses and proposes a fix (always a dry run:
+    GitHub is never touched); a fix succeeds when it then passes shadow promotion.
+    Uses recorded answers (--provider fake) unless --real is given.
+    """
+    _run_eval_command(
+        "propose", spec=spec, out=out, workdir=workdir, blocks=blocks, roles=roles,
+        faults=faults, max_cases=max_cases, seed=seed, repeats=repeats, real=real,
+        dry_run=dry_run, no_cache=no_cache, cache_dir=cache_dir, price_input=price_input,
+        price_output=price_output, expected_output=expected_output, record=record,
+        provider=provider, model=model, fake_responses=fake_responses, repo=repo,
+    )  # fmt: skip
 
-    spec_path = find_spec(spec)
-    try:
-        pipeline = load_spec(spec_path)
-        client = make_client(_llm_config(provider, model, fake_responses))
-    except SpecError as exc:
-        console.print(f"[red]Invalid spec:[/red] {exc}")
-        raise typer.Exit(code=2) from exc
-    except GuardianError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(code=1) from exc
-    recorder = RecordingClient(client) if record else None
-    with tempfile.TemporaryDirectory(prefix="guardian-fix-eval-") as tmp:
-        try:
-            cases = generate_cases(pipeline, Path(tmp), blocks=blocks or None, faults=["code_bug"])
-        except (KeyError, ValueError) as exc:
-            console.print(f"[red]{exc.args[0] if exc.args else exc}[/red]")
-            raise typer.Exit(code=2) from exc
-        console.print(
-            f"Proposing fixes for {len(cases)} case(s) with model {escape(client.model)}..."
-        )
-        report = run_fix_eval(
-            cases, recorder or client, spec=pipeline, spec_path=spec_path, repo=repo
-        )
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(report.to_markdown(), encoding="utf-8", newline="\n")
-    out.with_suffix(".json").write_text(
-        json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    if recorder and record:
-        recorder.save(record)
-        console.print(f"Recorded answers: {record}")
-    ok = sum(r.promoted for r in report.results)
-    console.print(f"fix success {ok}/{len(report.results)} ({report.success_rate:.1%})")
-    for role, (c, n) in report.by_role().items():
-        console.print(f"  {role}: {c}/{n}")
-    console.print(f"Report: {out}")
+
+eval_app.command("propose")(eval_propose_cmd)
+eval_app.command("fix", hidden=True)(eval_propose_cmd)  # the previous name
 
 
 def main() -> None:
