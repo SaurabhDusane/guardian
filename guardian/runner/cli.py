@@ -120,7 +120,7 @@ def _open(
             raise typer.BadParameter(str(exc), param_hint="--fault") from exc
     g = Guardian(spec, root, sample_rate=sample_rate, registry=registry, diagnoser=auto_diagnoser())
     try:
-        install_observability(g)  # OpenLineage / OpenTelemetry, if enabled in the env
+        install_observability(g)
     except GuardianError as exc:
         g.close()
         console.print(f"[red]{exc}[/red]")

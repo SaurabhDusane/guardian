@@ -96,7 +96,7 @@ def definitions_for(
     # Blocks with auto_diagnose get an advisory diagnosis after a ROLLBACK (core calls
     # the hook; LLM settings come from the environment).
     guardian = Guardian(spec, root, registry=registry, diagnoser=auto_diagnoser())
-    install_observability(guardian)  # OpenLineage / OpenTelemetry, if enabled in the env
+    install_observability(guardian)
     guardian.close()  # release the event DB until first use; it reopens lazily
     return build_definitions(guardian)
 

@@ -491,7 +491,6 @@ def build_evidence(
     redactor = Redactor(redact, [good, bad, last_good])
     items = _Items()
 
-    # Run outcome.
     total = len(good) + len(bad)
     items.add(
         "run_outcome",
@@ -531,7 +530,6 @@ def build_evidence(
             },
         )
 
-    # Quarantine sample.
     sample = []
     for record in bad_records[:sample_size]:
         values = {
@@ -550,7 +548,6 @@ def build_evidence(
         },
     )
 
-    # Schema diff.
     output_columns = _frame_columns(good, bad) if has_output else []
     if last_good is not None:  # payload keys are sorted: list known columns in their order
         known = [c for c in last_good.columns if c in output_columns]
@@ -613,7 +610,6 @@ def build_evidence(
             },
         )
 
-    # Per-column stats.
     for column in _frame_columns(last_good, good, bad):
         redacted = redactor.is_redacted(column)
 
@@ -636,7 +632,6 @@ def build_evidence(
             },
         )
 
-    # Code change since the last good run.
     now_code = g.code.get(run.code) if run.code else None
     base_code = g.code.get(baseline.code) if baseline and baseline.code else None
     code: dict[str, Any] = {
@@ -659,7 +654,6 @@ def build_evidence(
         code["diff_truncated"] = len(diff) > MAX_DIFF_LINES
     items.add("code_change", "the block's code on this run vs its last good run", code)
 
-    # Git history of the source file.
     if git:
         since, since_what = _last_promotion(g, block, baseline)
         history = git_history(now_code.file if now_code else None, since)
@@ -668,14 +662,12 @@ def build_evidence(
         history = {"available": False, "reason": "git lookup disabled"}
     items.add("git_history", "git history of the block's source since its last promotion", history)
 
-    # Input provenance.
     runs_on = {r.block: r for r in g.provenance.runs() if r.run_id == run_id}
     for entry in _inputs(g, block, run_id):
         upstream_run = runs_on.get(entry["upstream"])
         entry["upstream_outcome_on_run"] = upstream_run.outcome if upstream_run else None
         items.add("input", f"input {entry['upstream']}: {entry['quality']}", entry)
 
-    # DAG context.
     protecting = [
         {"dependent": d, "fallback_source": e.source, "adapter": e.adapter}
         for d in dependents(g.spec, block)
@@ -697,7 +689,6 @@ def build_evidence(
         },
     )
 
-    # Recent events.
     for event in _recent_events(g, block, run_id, max_events):
         data = dict(event.data)
         if "traceback" in data:

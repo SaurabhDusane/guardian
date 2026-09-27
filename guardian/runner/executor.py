@@ -127,7 +127,7 @@ class Executor:
                 frames.append(g.read(ref))
         except NoSafeInputError as exc:
             skipped = BlockSkipped(skip or str(exc), blocked=skip is None)
-            g.complete_block(block, run_id, skipped, inputs=[skipped])  # recorded in core
+            g.complete_block(block, run_id, skipped, inputs=[skipped])
             return BlockReport(
                 block,
                 Outcome.SKIPPED if skip is not None else Outcome.BLOCKED,
