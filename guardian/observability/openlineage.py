@@ -40,7 +40,7 @@ STATS_SCHEMA = (
     f"{_FACETS}/1-0-2/OutputStatisticsOutputDatasetFacet.json"
     "#/$defs/OutputStatisticsOutputDatasetFacet"
 )
-GUARDIAN_FACET_SCHEMA = f"{PRODUCER}/blob/main/README.md#observability"
+GUARDIAN_FACET_SCHEMA = f"{PRODUCER}/blob/main/docs/observability.md"
 
 # Events emitted while a block runs live. Others that name a block (replays, shadow runs,
 # promotions, status changes) are not block runs and never produce a BLOCK_OUTCOME.

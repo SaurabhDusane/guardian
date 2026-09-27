@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import re
 import uuid
+from pathlib import Path
 
 import pytest
 
 from guardian.demo.faults import crash
 from guardian.observability.openlineage import (
+    GUARDIAN_FACET_SCHEMA,
     PRODUCER,
     SCHEMA_URL,
     MemoryTransport,
@@ -118,3 +121,18 @@ def test_skipped_and_blocked_blocks(tmp_path) -> None:
     event = terminal(transport.events, blocked)
     assert event["eventType"] == "FAIL"
     assert event["run"]["facets"]["guardian_decision"]["outcome"] == "BLOCKED"
+
+
+def test_guardian_facet_schema_url_points_at_a_file_in_the_repo() -> None:
+    prefix = f"{PRODUCER}/blob/main/"
+    assert GUARDIAN_FACET_SCHEMA.startswith(prefix)
+    path, _, anchor = GUARDIAN_FACET_SCHEMA.removeprefix(prefix).partition("#")
+    target = Path(__file__).parents[2] / path
+    assert target.is_file(), path
+    if anchor:  # GitHub's heading anchors: lowercase, punctuation dropped, spaces to '-'
+        slugs = {
+            re.sub(r"[^\w\- ]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
+            for line in target.read_text(encoding="utf-8").splitlines()
+            if line.startswith("#")
+        }
+        assert anchor in slugs, f"{path} has no heading #{anchor}"
