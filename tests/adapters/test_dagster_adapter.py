@@ -42,8 +42,7 @@ def test_module_defs_are_lazy(tmp_path) -> None:
 
 
 def test_candidate_runs_inside_the_same_materialization(tmp_path) -> None:
-    """Shadow comparison happens in the block's own materialization, reported as
-    materialization metadata and as the guardian_shadow asset check."""
+    """Reported as materialization metadata and as the guardian_shadow asset check."""
     from guardian.adapters.dagster import build_definitions
     from guardian.adapters.dagster.io_manager import RUN_ID_TAG
     from guardian.core.events import EventKind

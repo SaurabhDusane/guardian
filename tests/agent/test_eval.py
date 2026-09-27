@@ -45,8 +45,7 @@ def test_a_case_for_every_block_and_fault_type(cases) -> None:
 
 @pytest.mark.slow  # every block x fault type
 def test_every_case_carries_the_evidence_that_separates_its_label(cases) -> None:
-    """A correct diagnosis is possible from the bundle alone: schema changes show in the
-    schema diff, code bugs in the code fingerprint, data drift in neither."""
+    """Schema changes show in the schema diff, code bugs in the fingerprint, drift in neither."""
     for c in cases:
         schema = c.bundle.of_kind("schema_diff")[0].data
         code = c.bundle.of_kind("code_change")[0].data
@@ -200,8 +199,7 @@ def test_eval_cli_with_recorded_answers(tmp_path) -> None:
 
 @pytest.mark.slow  # every block x fault type
 def test_fix_success_rate_by_role(cases, project_repo) -> None:
-    """Every block's code_bug case: diagnose -> propose (dry run) -> shadow -> promote.
-    One block gets a fix that breaks it, one is misdiagnosed; the rest must succeed."""
+    """One block gets a broken fix, one is misdiagnosed; every other fix is promoted."""
     broken = representative(SPEC, "leaf")
     misdiagnosed = representative(SPEC, "source")
     responses = {}

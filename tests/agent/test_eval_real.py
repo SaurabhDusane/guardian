@@ -391,8 +391,7 @@ def _redacted_values(root, spec) -> set[str]:
 
 
 def test_no_redacted_value_ever_reaches_a_cached_prompt(tmp_path, project_repo) -> None:
-    """Diagnosis and fix prompts, for every block that carries a redacted column (also
-    the ones that do not declare it), for every fault type, as a real run caches them."""
+    """Includes blocks that carry a redacted column without declaring it."""
     redacted = {c for b in SPEC.blocks for c in b.redact_columns}
     assert redacted, "the demo spec must declare redact_columns for this test to mean anything"
     probe = agent_eval.generate_cases(SPEC, tmp_path / "probe", pairs=[])

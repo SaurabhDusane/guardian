@@ -1,4 +1,4 @@
-"""Scenario 10: the self-healing loop, for every DAG role (standalone runner, FakeClient).
+"""The self-healing loop, for every DAG role (standalone runner, FakeClient).
 
 detect (code_bug -> ROLLBACK) -> contain (dependents follow the fallback/stale rules)
 -> diagnose (code_bug) -> propose (dry run: a new version, verified in a worktree)
@@ -29,7 +29,9 @@ PROFILES = block_profiles(SPEC)
 
 
 @by_role
-def test_10_self_healing_loop(tmp_path, project_repo, role: str) -> None:
+def test_self_healing_loop_from_bad_deploy_to_fresh_output(
+    tmp_path, project_repo, role: str
+) -> None:
     block = representative(SPEC, role)
     runner = StandaloneRunner(SPEC, tmp_path / "guardian")
 

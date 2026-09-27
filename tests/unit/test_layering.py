@@ -37,9 +37,9 @@ def test_no_block_names_in_core_runner_adapters_or_agent() -> None:
 
 
 def test_agent_code_never_promotes_merges_or_changes_state() -> None:
-    """Belt and braces for the runtime guards (agent_view, SafeGit, GitHubClient): no
-    agent module calls a state-changing Guardian method or a merge endpoint. The eval
-    harness is the one exception: it plays the human reviewer on its own scratch copies."""
+    """No agent module calls a state-changing Guardian method or a merge endpoint."""
+    # Backs up the runtime guards (agent_view, SafeGit, GitHubClient). The eval harness is
+    # the one exception: it plays the human reviewer on its own scratch copies.
     import re
 
     root = Path(__file__).parents[2] / "guardian" / "agent"
@@ -59,8 +59,7 @@ def test_agent_code_never_promotes_merges_or_changes_state() -> None:
 
 
 def test_observability_is_optional_and_outside_core() -> None:
-    """Core never imports the exporters; the CLI imports them without OpenTelemetry
-    unless it is enabled."""
+    """Core never imports the exporters; the CLI needs OpenTelemetry only when enabled."""
     code = (
         "import sys, guardian.core.guardian; "
         "assert not any(m.startswith('guardian.observability') for m in sys.modules); "

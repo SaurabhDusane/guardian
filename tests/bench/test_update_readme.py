@@ -123,11 +123,6 @@ def test_quick_or_unfinished_results_are_refused(tmp_path, results) -> None:
         assert update_readme.main([*args, "--allow-partial", "--check"]) == 0
 
 
-def test_repo_readme_has_the_results_markers() -> None:
-    text = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert text.index(update_readme.START) < text.index(update_readme.END)
-
-
 # ---------------------------------------------------------------- agent eval table
 
 
@@ -204,6 +199,14 @@ def test_agent_table_fills_the_readme_and_refuses_fake_answers(tmp_path, agent_r
         update_readme.main(["--agent-results", str(missing), "--readme", str(readme)])
 
 
-def test_repo_readme_has_the_agent_eval_markers() -> None:
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [
+        (update_readme.START, update_readme.END),
+        (update_readme.AGENT_START, update_readme.AGENT_END),
+    ],
+    ids=["results", "agent_eval"],
+)
+def test_repo_readme_has_the_generated_table_markers(start, end) -> None:
     text = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert text.index(update_readme.AGENT_START) < text.index(update_readme.AGENT_END)
+    assert text.index(start) < text.index(end)

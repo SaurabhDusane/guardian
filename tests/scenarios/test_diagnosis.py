@@ -1,4 +1,4 @@
-"""Scenario 9: automated diagnosis after a ROLLBACK, for every DAG role, under every runner.
+"""Automated diagnosis after a ROLLBACK, for every DAG role, under every runner.
 
 `auto_diagnose: true` on a block runs the (advisory) diagnosis agent after the block
 rolls back. Whatever the agent does, including failing, the run proceeds exactly as it
@@ -40,7 +40,7 @@ def auto(runner, block: str) -> None:
 
 
 @by_role
-def test_9a_auto_diagnosis_after_rollback(runner, role: str) -> None:
+def test_auto_diagnosis_runs_after_rollback(runner, role: str) -> None:
     block = representative(SPEC, role)
     auto(runner, block)
     client = FakeClient({f"{block}/r2": RECORDED}, model="recorded")
@@ -66,7 +66,7 @@ def test_9a_auto_diagnosis_after_rollback(runner, role: str) -> None:
 
 
 @by_role
-def test_9b_diagnosis_failure_never_fails_the_pipeline(runner, role: str) -> None:
+def test_diagnosis_failure_never_fails_the_pipeline(runner, role: str) -> None:
     block = representative(SPEC, role)
     auto(runner, block)
 
@@ -86,7 +86,7 @@ def test_9b_diagnosis_failure_never_fails_the_pipeline(runner, role: str) -> Non
     assert runner.events(EventKind.DIAGNOSIS) == []
 
 
-def test_9c_auto_diagnosis_is_opt_in(runner) -> None:
+def test_auto_diagnosis_is_opt_in(runner) -> None:
     block = representative(SPEC, "source")
     calls = []
     runner.diagnoser = lambda g, b, r: calls.append((b, r))

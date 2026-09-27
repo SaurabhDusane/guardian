@@ -91,10 +91,7 @@ def test_demo_replay_after_fix(tmp_path) -> None:
 
 
 def test_v2_matches_v1_and_v_bad_differs_on_messy_demo_data(tmp_path) -> None:
-    """v2s are improvements that leave well-formed rows alone; v_bads are off-by-ones.
-
-    Each version runs on the live inputs its block saw in a real (messy) demo run.
-    """
+    """Each version runs on the live inputs its block saw in a messy demo run."""
     with Guardian(load_spec(DEMO_SPEC), tmp_path) as g:
         Executor(g).run("r1")
         checked = 0

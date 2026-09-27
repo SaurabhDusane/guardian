@@ -1,4 +1,4 @@
-"""Phase 8: provenance and blast radius (8a-8f), for every DAG role, under both runners.
+"""Provenance and blast radius, for every DAG role, under both runners.
 
 Blocks come from their role; expected qualities and impact sets are derived from the
 spec's DAG and the resolution rules, never from block names.
@@ -43,13 +43,11 @@ def expected_read(block: str, upstream: str) -> str:
     return FALLBACK if SPEC.block(block).fallback_for(upstream) else STALE
 
 
-# ---------------------------------------------------------------- 8a-8c
+# ---------------------------------------------------------------- quality propagation
 
 
 @by_role
-def test_8abc_fault_quality_propagates_and_impact_lists_it(runner, role: str) -> None:
-    """8a (fallback_protected: the fallback reader is FALLBACK), 8b (unprotected: dependents
-    are STALE) and 8c (source: the whole downstream subgraph degrades), for every role."""
+def test_fault_quality_propagates_and_impact_lists_it(runner, role: str) -> None:
     x = representative(SPEC, role)
     runner.run("r0")
     runner.inject_fault(x, corrupt(x, 0.5, seed=2))
@@ -75,16 +73,16 @@ def test_8abc_fault_quality_propagates_and_impact_lists_it(runner, role: str) ->
     assert touched == {(b, "r1") for b in downstream}
     if role == "leaf":
         assert touched == set()  # empty apart from the block itself
-    if role == "fallback_protected":  # 8a
+    if role == "fallback_protected":  # the fallback reader is FALLBACK
         assert any(quality(runner, d, "r1") == FALLBACK for d in dependents(SPEC, x))
-    if role == "unprotected":  # 8b
+    if role == "unprotected":  # dependents are STALE
         assert all(quality(runner, d, "r1") == STALE for d in dependents(SPEC, x))
-    if role == "source":  # 8c
+    if role == "source":  # the whole downstream subgraph degrades
         assert downstream == set(SPEC.block_names) - {x}
     check_invariants(runner, "r1")
 
 
-def test_8a_fallback_reader_is_fallback_and_listed(runner) -> None:
+def test_fallback_reader_is_marked_fallback_and_listed(runner) -> None:
     x = representative(SPEC, "fallback_protected")
     d = next(d for d in dependents(SPEC, x) if SPEC.block(d).fallback_for(x))
     edge = SPEC.block(d).fallback_for(x)
@@ -102,7 +100,7 @@ def test_8a_fallback_reader_is_fallback_and_listed(runner) -> None:
     assert (d, "r1") in impacted(runner, x)[1]
 
 
-def test_8b_unprotected_dependents_are_stale(runner) -> None:
+def test_unprotected_dependents_are_stale(runner) -> None:
     x = representative(SPEC, "unprotected")
     runner.run("r0")
     runner.set_block_status(x, BlockStatus.OUT)
@@ -115,7 +113,7 @@ def test_8b_unprotected_dependents_are_stale(runner) -> None:
     assert {(d, "r1") for d in dependents(SPEC, x)} <= touched
 
 
-def test_8c_source_fault_degrades_the_whole_subgraph(runner) -> None:
+def test_source_fault_degrades_the_whole_subgraph(runner) -> None:
     x = representative(SPEC, "source")
     runner.run("r0")
     runner.inject_fault(x, crash())
@@ -125,10 +123,10 @@ def test_8c_source_fault_degrades_the_whole_subgraph(runner) -> None:
     assert impacted(runner, x)[1] == {(b, "r1") for b in descendants(SPEC, x)}
 
 
-# ---------------------------------------------------------------- 8d
+# ---------------------------------------------------------------- two blocks down
 
 
-def test_8d_fallback_source_and_replaced_block_both_down_is_stale(runner) -> None:
+def test_fallback_ignored_when_source_degraded(runner) -> None:
     x = representative(SPEC, "fallback_protected")
     d = next(d for d in dependents(SPEC, x) if SPEC.block(d).fallback_for(x))
     s = SPEC.block(d).fallback_for(x).source
@@ -149,11 +147,11 @@ def test_8d_fallback_source_and_replaced_block_both_down_is_stale(runner) -> Non
     check_invariants(runner, "r1")
 
 
-# ---------------------------------------------------------------- 8e
+# ---------------------------------------------------------------- recovery
 
 
 @by_role
-def test_8e_after_promotion_and_replay_next_run_is_fresh(runner, role: str) -> None:
+def test_next_run_is_fresh_after_promotion_and_replay(runner, role: str) -> None:
     x = versioned(role)
     runner.run("r0")
     runner.inject_fault(x, corrupt(x, 0.5, seed=2))
@@ -176,7 +174,7 @@ def test_8e_after_promotion_and_replay_next_run_is_fresh(runner, role: str) -> N
     check_invariants(runner, "r3")
 
 
-# ---------------------------------------------------------------- 8f
+# ---------------------------------------------------------------- impact
 
 
 FAULTS = ("crash", "corrupt", "out")
@@ -213,13 +211,13 @@ def _8f_settings(examples: int):
 @pytest.mark.slow
 @_8f_settings(6)
 @given(data=st.data())
-def test_8f_impact_matches_an_independent_computation(runner, data) -> None:
+def test_impact_matches_an_independent_computation(runner, data) -> None:
     check_8f(runner, data)
 
 
 @_8f_settings(2)
 @given(data=st.data())
-def test_8f_impact_matches_an_independent_computation_quick(runner, data) -> None:
+def test_impact_matches_an_independent_computation_quick(runner, data) -> None:
     """The same property, fewer examples (the default run); the full run has 6."""
     check_8f(runner, data)
 

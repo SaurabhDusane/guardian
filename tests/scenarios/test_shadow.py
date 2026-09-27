@@ -1,4 +1,4 @@
-"""Phase 7 shadow promotion scenarios (7a-7g), parametrized over every DAG role.
+"""Shadow promotion scenarios, parametrized over every DAG role.
 
 Each role's representative block declares ``v1`` (active), ``v2`` (an improvement that
 is identical on well-formed data) and ``v_bad`` (an off-by-one). Nothing here names a
@@ -59,11 +59,11 @@ def assert_normal_edges(runner, result, block: str, run_id: str) -> None:
     assert runner.provenance(block, run_id)["quality"] == Quality.FRESH.value
 
 
-# ---------------------------------------------------------------- 7a
+# ---------------------------------------------------------------- absolute mode
 
 
 @by_role
-def test_7a_out_block_absolute_shadow_approved_promotion(runner, role: str) -> None:
+def test_out_block_promotes_in_absolute_mode_only_with_approval(runner, role: str) -> None:
     x = versioned(role)
     runner.run("r0")
     runner.inject_fault(x, corrupt(x, 0.5, seed=2))
@@ -108,11 +108,11 @@ def test_7a_out_block_absolute_shadow_approved_promotion(runner, role: str) -> N
     check_invariants(runner, "r1", "r2")
 
 
-# ---------------------------------------------------------------- 7b
+# ---------------------------------------------------------------- parity auto-promotion
 
 
 @by_role
-def test_7b_healthy_parity_shadow_auto_promotes(runner, role: str) -> None:
+def test_healthy_block_auto_promotes_after_parity_runs(runner, role: str) -> None:
     x = versioned(role)
     req = required_runs(x)
     runner.run("r0")
@@ -140,11 +140,11 @@ def test_7b_healthy_parity_shadow_auto_promotes(runner, role: str) -> None:
     check_invariants(runner, "r0", "after")
 
 
-# ---------------------------------------------------------------- 7c
+# ---------------------------------------------------------------- bad candidate
 
 
 @by_role
-def test_7c_bad_candidate_is_never_promoted(runner, role: str) -> None:
+def test_bad_candidate_is_never_promoted(runner, role: str) -> None:
     x = versioned(role)
     policy = SPEC.block(x).shadow_policy()
     runner.run("r0")
@@ -174,11 +174,11 @@ def test_7c_bad_candidate_is_never_promoted(runner, role: str) -> None:
     check_invariants(runner, *[f"r{i}" for i in range(runs_n + 1)])
 
 
-# ---------------------------------------------------------------- 7d
+# ---------------------------------------------------------------- rollback
 
 
 @by_role
-def test_7d_promote_then_rollback_restores_previous_version(runner, role: str) -> None:
+def test_rollback_after_promotion_restores_previous_version(runner, role: str) -> None:
     x = versioned(role)
     runner.run("r0")
     runner.shadow_start(x, "v2")
@@ -205,11 +205,11 @@ def test_7d_promote_then_rollback_restores_previous_version(runner, role: str) -
     check_invariants(runner, "r0", "r1", "r2", "r3")
 
 
-# ---------------------------------------------------------------- 7e
+# ---------------------------------------------------------------- isolation of candidates
 
 
 @by_role
-def test_7e_no_consumer_ever_reads_a_candidate(runner, role: str) -> None:
+def test_no_consumer_ever_reads_a_candidate(runner, role: str) -> None:
     x = versioned(role)
     runner.run("r0")
     runner.shadow_start(x, "v_bad")  # a candidate whose output differs from live
@@ -241,7 +241,7 @@ def test_7e_no_consumer_ever_reads_a_candidate(runner, role: str) -> None:
     check_invariants(runner, "r1", "r2")
 
 
-# ---------------------------------------------------------------- 7f
+# ---------------------------------------------------------------- two blocks in shadow
 
 
 def _shadow_pair(role: str) -> tuple[str, str]:
@@ -257,9 +257,7 @@ def _shadow_pair(role: str) -> tuple[str, str]:
 
 
 @by_role
-def test_7f_two_blocks_in_shadow_read_live_inputs_and_promote_independently(
-    runner, role: str
-) -> None:
+def test_two_blocks_in_shadow_read_live_inputs_and_promote_independently(runner, role: str) -> None:
     up, down = _shadow_pair(role)
     req = required_runs(up)
     assert required_runs(down) == req
@@ -284,12 +282,12 @@ def test_7f_two_blocks_in_shadow_read_live_inputs_and_promote_independently(
     check_invariants(runner, *[f"r{i}" for i in range(req + 2)])
 
 
-# ---------------------------------------------------------------- 7g
+# ---------------------------------------------------------------- interrupted promotion
 
 
 @by_role
 @pytest.mark.parametrize("interrupt", ["during_replay", "after_replay"])
-def test_7g_interrupted_promotion_is_resumable(runner, role: str, interrupt: str) -> None:
+def test_interrupted_promotion_is_resumable(runner, role: str, interrupt: str) -> None:
     x = versioned(role)
     runner.run("r0")
     runner.inject_fault(x, corrupt(x, 0.5, seed=2))

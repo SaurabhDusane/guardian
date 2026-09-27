@@ -1,4 +1,4 @@
-"""Scenario 11: statistical drift, for every DAG role, under every runner.
+"""Statistical drift, for every DAG role, under every runner.
 
 The `drift` fault skews a block's output while every row stays schema-valid. Schema
 validation alone lets it through; a drift policy catches it (FAIL -> ROLLBACK, with
@@ -42,7 +42,7 @@ def warm_up(runner) -> None:
 
 
 @by_role
-def test_11a_schema_validation_alone_misses_drift(runner, role: str) -> None:
+def test_schema_validation_alone_misses_drift(runner, role: str) -> None:
     block = representative(SPEC, role)
     with_drift(runner, block, None)
     warm_up(runner)
@@ -58,7 +58,7 @@ def test_11a_schema_validation_alone_misses_drift(runner, role: str) -> None:
 
 
 @by_role
-def test_11b_drift_detection_catches_it(runner, role: str) -> None:
+def test_drift_policy_rolls_back_schema_valid_drift(runner, role: str) -> None:
     block = representative(SPEC, role)
     with_drift(runner, block, DriftPolicy())
     warm_up(runner)
@@ -91,7 +91,7 @@ def test_11b_drift_detection_catches_it(runner, role: str) -> None:
 
 
 @by_role
-def test_11c_drift_below_fail_threshold_only_warns(runner, role: str) -> None:
+def test_drift_below_fail_threshold_only_warns(runner, role: str) -> None:
     block = representative(SPEC, role)
     lenient = DriftPolicy(fail=DriftThresholds(psi=1e6, z=1e9))
     with_drift(runner, block, lenient)

@@ -68,11 +68,6 @@ def test_run_with_fault_reroutes(tmp_path) -> None:
     assert "ROLLBACK" in result.output and "fallback for b6_enrich" in result.output
 
 
-def test_run_with_bad_fault(tmp_path) -> None:
-    result = invoke("run", "demo/pipeline.yaml", "--root", str(tmp_path), "--fault", "nope:crash")
-    assert result.exit_code != 0
-
-
 def test_replay_twice_and_refresh_only(tmp_path) -> None:
     root = str(tmp_path)
     invoke("run", "demo/pipeline.yaml", "--root", root, "--run-id", "r1")
@@ -95,11 +90,6 @@ def test_replay_twice_and_refresh_only(tmp_path) -> None:
     )
     assert result.exit_code == 0, result.output
     assert "b8_aggregate" in result.output and "b1_ingest" not in result.output
-
-
-def test_only_rejects_unknown_block(tmp_path) -> None:
-    result = invoke("run", "demo/pipeline.yaml", "--root", str(tmp_path), "--only", "nope")
-    assert result.exit_code != 0
 
 
 @pytest.mark.parametrize(

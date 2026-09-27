@@ -44,67 +44,65 @@ def test_topological_order_respects_inputs_and_fallback_sources() -> None:
     assert order.index("x") < order.index("c")
 
 
-def test_rejects_cycle() -> None:
-    with pytest.raises(SpecError, match="cycle"):
-        parse_spec(
-            spec(
+FALLBACK_TO_C = {
+    "name": "b",
+    "fn": "m:f",
+    "inputs": ["a"],
+    "fallbacks": [{"replaces": "a", "source": "c"}],
+}
+
+
+@pytest.mark.parametrize(
+    ("blocks", "match"),
+    [
+        pytest.param(
+            [
                 {"name": "a", "fn": "m:f", "inputs": ["c"]},
                 {"name": "b", "fn": "m:f", "inputs": ["a"]},
                 {"name": "c", "fn": "m:f", "inputs": ["b"]},
-            )
-        )
-
-
-def test_rejects_cycle_through_fallback_edge() -> None:
-    with pytest.raises(SpecError, match="cycle"):
-        parse_spec(
-            spec(
+            ],
+            "cycle",
+            id="cycle",
+        ),
+        pytest.param(
+            [
                 {"name": "a", "fn": "m:f"},
-                {
-                    "name": "b",
-                    "fn": "m:f",
-                    "inputs": ["a"],
-                    "fallbacks": [{"replaces": "a", "source": "c"}],
-                },
+                FALLBACK_TO_C,
                 {"name": "c", "fn": "m:f", "inputs": ["b"]},
-            )
-        )
-
-
-def test_rejects_self_input() -> None:
-    with pytest.raises(SpecError):
-        parse_spec(spec({"name": "a", "fn": "m:f", "inputs": ["a"]}))
-
-
-def test_rejects_unknown_input() -> None:
-    with pytest.raises(SpecError, match="unknown input 'ghost'"):
-        parse_spec(spec({"name": "a", "fn": "m:f", "inputs": ["ghost"]}))
-
-
-def test_rejects_fallback_to_nonexistent_block() -> None:
-    with pytest.raises(SpecError, match="nonexistent block 'ghost'"):
-        parse_spec(
-            spec(
+            ],
+            "cycle",
+            id="cycle_through_fallback_edge",
+        ),
+        pytest.param(
+            [{"name": "a", "fn": "m:f", "inputs": ["a"]}], "lists itself", id="self_input"
+        ),
+        pytest.param(
+            [{"name": "a", "fn": "m:f", "inputs": ["ghost"]}],
+            "unknown input 'ghost'",
+            id="unknown_input",
+        ),
+        pytest.param(
+            [
                 {"name": "a", "fn": "m:f"},
-                {
-                    "name": "b",
-                    "fn": "m:f",
-                    "inputs": ["a"],
-                    "fallbacks": [{"replaces": "a", "source": "ghost"}],
-                },
-            )
-        )
-
-
-def test_rejects_fallback_for_non_input() -> None:
-    with pytest.raises(SpecError, match="not one of its inputs"):
-        parse_spec(
-            spec(
+                {**FALLBACK_TO_C, "fallbacks": [{"replaces": "a", "source": "ghost"}]},
+            ],
+            "nonexistent block 'ghost'",
+            id="fallback_to_nonexistent_block",
+        ),
+        pytest.param(
+            [
                 {"name": "a", "fn": "m:f"},
                 {"name": "x", "fn": "m:f"},
                 {"name": "b", "fn": "m:f", "fallbacks": [{"replaces": "a", "source": "x"}]},
-            )
-        )
+            ],
+            "not one of its inputs",
+            id="fallback_for_non_input",
+        ),
+    ],
+)
+def test_rejects_invalid_dag(blocks, match) -> None:
+    with pytest.raises(SpecError, match=match):
+        parse_spec(spec(*blocks))
 
 
 @pytest.mark.parametrize(

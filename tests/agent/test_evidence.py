@@ -140,8 +140,7 @@ def test_quarantine_sample_is_capped(tmp_path) -> None:
 
 @by_role
 def test_redacted_columns_never_appear(tmp_path, role: str) -> None:
-    """Every column of the block is redacted: no text value of it may leave, even in
-    validation messages; stats keep only counts and null rates."""
+    """With every column redacted, no value leaves, not even inside validation messages."""
     block = representative(SPEC, role)
     root = tmp_path / "g"
     run(root, SPEC, "r0")
@@ -215,8 +214,7 @@ def test_dag_item_matches_the_spec_for_every_block(tmp_path) -> None:
 
 
 def test_inputs_record_where_each_input_came_from(tmp_path) -> None:
-    """A crash of a fallback-protected block: its dependent's bundle shows the fallback
-    read; the crashed block's bundle shows its (fresh) inputs, no output, the error."""
+    """The dependent shows the fallback read; the crashed block its inputs and the error."""
     block = representative(SPEC, "fallback_protected")
     reader = next(d for d in dependents(SPEC, block) if SPEC.block(d).fallback_for(block))
     root = tmp_path / "g"

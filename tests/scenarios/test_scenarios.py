@@ -238,13 +238,9 @@ def test_taken_out_then_restored(runner: ScenarioRunner, role: str) -> None:
 
 @by_role
 def test_replay_after_fix(runner: ScenarioRunner, role: str) -> None:
-    """Replay recovers what the fixed block can re-derive, exactly once, idempotently.
-
-    Rows rolled back only because their batch failed (rule ``rollback``) are always
-    recovered. Rows whose corruption the block cannot re-derive (a source cannot
-    regenerate its data; a summary block cannot rebuild itself from its own output)
-    stay QUARANTINED.
-    """
+    """Replay recovers what the fixed block can re-derive, exactly once."""
+    # Rows held only because their batch rolled back are always recovered. Corruption the
+    # block cannot re-derive (a source's data, a summary's own rows) stays QUARANTINED.
     x = representative(SPEC, role)
     runner.run("r0")
     base_keys = keys(runner.snapshot(x, "r0"), x)
@@ -297,8 +293,7 @@ def _sorted(df: pd.DataFrame, block: str) -> pd.DataFrame:
 def test_descendants_after_replay_match_clean_run(
     runner: ScenarioRunner, tmp_path, prior_clean_run: bool
 ) -> None:
-    """Outage in a fallback-protected block, fix, replay, recompute its descendants:
-    the results equal an uninterrupted run."""
+    """Outage, fix, replay, recompute: descendants equal an uninterrupted run."""
     x = representative(SPEC, "fallback_protected")
     downstream = descendants(SPEC, x)
     clean = type(runner)(runner.spec, tmp_path / "clean")

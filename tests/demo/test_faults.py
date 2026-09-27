@@ -121,8 +121,7 @@ def test_corrupt_rows_unique_values(df) -> None:
 
 
 def test_code_bug_swaps_the_implementation(df) -> None:
-    """A new implementation (its code fingerprint differs), wrong in exactly
-    round(fraction * n) rows: numbers negated, text padded, timestamps lost."""
+    """A new fingerprint, wrong in exactly round(fraction * n) rows."""
     from guardian.core.code import fingerprint
 
     def block(frame: pd.DataFrame) -> pd.DataFrame:
