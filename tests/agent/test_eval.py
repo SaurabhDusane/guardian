@@ -170,7 +170,8 @@ def test_eval_cli_with_recorded_answers(tmp_path) -> None:
     assert result.exit_code == 0, result.output
     assert "accuracy 4/4 (100.0%)" in result.output
     assert "Model: `recorded-model`" in out.read_text(encoding="utf-8")
-    assert json.loads(out.with_suffix(".json").read_text(encoding="utf-8"))["accuracy"] == 1.0
+    saved = json.loads(out.with_suffix(".json").read_text(encoding="utf-8"))
+    assert saved["diagnose"]["accuracy"] == 1.0  # each eval command has its own section
     assert set(json.loads(rerecorded.read_text(encoding="utf-8"))["responses"]) == {
         f"{block}:{f}" for f in FAULT_TYPES
     }

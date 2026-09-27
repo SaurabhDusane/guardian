@@ -18,8 +18,11 @@
 Items are numbered E1, E2, ... in that order. The bundle is deterministic: the same
 stored state always yields the same JSON. It depends only on stored records up to
 the diagnosed run, never on the wall clock. It is also minimized before it can reach
-an LLM: samples are capped, long text is cut, and values of the block's
-``redact_columns`` are masked everywhere, including inside messages.
+an LLM: samples are capped, long text is cut, and values of every column listed in
+the ``redact_columns`` of any block of the pipeline are masked everywhere, including
+inside messages. Redaction is pipeline-wide because a column keeps its name as the
+data flows downstream: an email column declared sensitive at ingest is just as
+sensitive in the blocks after it, whether or not they repeat the declaration.
 """
 
 from __future__ import annotations
@@ -43,7 +46,7 @@ from guardian.core.code import CodeFingerprint
 from guardian.core.dag import ancestors, dependents, roles_of
 from guardian.core.events import ALWAYS_LOGGED, Event, EventKind
 from guardian.core.guardian import ROLLBACK_RULE, Guardian
-from guardian.core.models import GuardianError, QuarantineRecord, validate_name
+from guardian.core.models import GuardianError, PipelineSpec, QuarantineRecord, validate_name
 from guardian.core.provenance import QUALITY_COL, BlockRun, snapshot_id
 from guardian.core.quarantine import restore_dtypes
 from guardian.core.validation import PanderaValidator
@@ -443,6 +446,13 @@ class _Items:
         self.items.append(EvidenceItem(f"E{len(self.items) + 1}", kind, title, data))
 
 
+def redacted_columns(spec: PipelineSpec, block: str) -> tuple[str, ...]:
+    """The columns masked in ``block``'s evidence: its own ``redact_columns``, then
+    those of every other block (see the module docstring)."""
+    own = spec.block(block).redact_columns
+    return tuple(dict.fromkeys([*own, *(c for b in spec.blocks for c in b.redact_columns)]))
+
+
 def build_evidence(
     g: Guardian,
     block: str,
@@ -451,8 +461,14 @@ def build_evidence(
     sample_size: int = DEFAULT_SAMPLE_SIZE,
     git: bool = True,
     max_events: int = MAX_EVENTS,
+    timestamps: bool = True,
 ) -> EvidenceBundle:
-    """Gather the evidence for one run of ``block`` (default: its latest ROLLBACK)."""
+    """Gather the evidence for one run of ``block`` (default: its latest ROLLBACK).
+
+    ``timestamps=False`` leaves the events' wall-clock times out (they stay in order),
+    so the same state always gives the same bundle: the eval relies on it to cache
+    answers by prompt.
+    """
     if sample_size < 0:
         raise ValueError("sample_size must be >= 0")
     spec = g.spec.block(block)
@@ -471,7 +487,8 @@ def build_evidence(
         good = _frame_from_payloads(held_good, dtypes)
     bad = _frame_from_payloads(bad_records, dtypes)
     has_output = bool(records) or run.outcome == "PASS"
-    redactor = Redactor(spec.redact_columns, [good, bad, last_good])
+    redact = redacted_columns(g.spec, block)
+    redactor = Redactor(redact, [good, bad, last_good])
     items = _Items()
 
     # Run outcome.
@@ -685,17 +702,16 @@ def build_evidence(
         data = dict(event.data)
         if "traceback" in data:
             data["traceback"] = "..." + str(data["traceback"])[-MAX_TRACEBACK:]
-        items.add(
-            "event",
-            f"{event.kind.value} event for {event.block} on {event.run_id}",
-            {
-                "event": event.kind.value,
-                "block": event.block,
-                "run_id": event.run_id,
-                "ts": event.ts.isoformat(),
-                "data": _jsonable(data, MAX_TRACEBACK + 3),
-            },
-        )
+        item: dict[str, Any] = {
+            "event": event.kind.value,
+            "block": event.block,
+            "run_id": event.run_id,
+            "ts": event.ts.isoformat(),
+            "data": _jsonable(data, MAX_TRACEBACK + 3),
+        }
+        if not timestamps:
+            del item["ts"]
+        items.add("event", f"{event.kind.value} event for {event.block} on {event.run_id}", item)
 
     scrubbed = tuple(
         EvidenceItem(i.id, i.kind, redactor.text(i.title), _scrub_item(redactor, i))
@@ -706,7 +722,7 @@ def build_evidence(
         block=block,
         run_id=run_id,
         items=scrubbed,
-        redact_columns=spec.redact_columns,
+        redact_columns=redact,
         sample_size=sample_size,
     )
 

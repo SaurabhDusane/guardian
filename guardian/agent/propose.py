@@ -224,6 +224,16 @@ def parse_fix(text: str, root_cause: str) -> FixPlan:
     return plan
 
 
+def fix_prompt(bundle: EvidenceBundle, diagnosis: Diagnosis, context: Mapping[str, Any]) -> str:
+    """The first request for a fix plan (a retry appends why the answer was rejected)."""
+    return (
+        f"Propose a fix for block {bundle.block!r} (run {bundle.run_id!r}).\n\n"
+        f"<diagnosis>\n{json.dumps(diagnosis.to_dict(), sort_keys=True)}\n</diagnosis>\n\n"
+        f"<context>\n{json.dumps(context, sort_keys=True)}\n</context>\n\n"
+        f"<evidence>\n{bundle.to_json(indent=None)}\n</evidence>"
+    )
+
+
 def request_fix(
     bundle: EvidenceBundle,
     diagnosis: Diagnosis,
@@ -239,12 +249,7 @@ def request_fix(
     ``check``) are retried once; citations of evidence that does not exist are rejected
     without retry.
     """
-    prompt = (
-        f"Propose a fix for block {bundle.block!r} (run {bundle.run_id!r}).\n\n"
-        f"<diagnosis>\n{json.dumps(diagnosis.to_dict(), sort_keys=True)}\n</diagnosis>\n\n"
-        f"<context>\n{json.dumps(context, sort_keys=True)}\n</context>\n\n"
-        f"<evidence>\n{bundle.to_json(indent=None)}\n</evidence>"
-    )
+    prompt = fix_prompt(bundle, diagnosis, context)
     error = ""
     for attempt in (1, 2):
         text_prompt = prompt

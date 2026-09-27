@@ -1,11 +1,13 @@
-"""Fill in the README's Results table from bench/results.json (no hand-typed numbers).
+"""Fill in the README's Results and agent-eval tables from bench/results.json and
+bench/agent_eval.json (no hand-typed numbers).
 
-    uv run python bench/update_readme.py            # rewrite the table in README.md
+    uv run python bench/update_readme.py            # rewrite the tables in README.md
     uv run python bench/update_readme.py --check    # exit 1 if the README is out of date
 
-The table sits between the ``<!-- bench-results:start -->`` and
-``<!-- bench-results:end -->`` markers. Results from ``--quick`` runs or unfinished runs
-are refused unless ``--allow-partial`` is given. ``run_bench.py`` uses
+The tables sit between the ``<!-- bench-results:start/end -->`` and
+``<!-- agent-eval:start/end -->`` markers; each is filled only when its JSON exists.
+Benchmarks from ``--quick`` or unfinished runs, and agent evals of recorded (fake)
+answers, are refused unless ``--allow-partial`` is given. ``run_bench.py`` uses
 ``render_results_md`` from here to write bench/results.md, so both documents are rendered
 from the same JSON by the same code.
 """
@@ -22,6 +24,8 @@ BENCH = Path(__file__).resolve().parent
 REPO = BENCH.parent
 START = "<!-- bench-results:start -->"
 END = "<!-- bench-results:end -->"
+AGENT_START = "<!-- agent-eval:start -->"
+AGENT_END = "<!-- agent-eval:end -->"
 
 
 # ---------------------------------------------------------------- lookups and formats
@@ -328,40 +332,156 @@ def render_results_md(data: dict[str, Any]) -> str:
 # ---------------------------------------------------------------- README
 
 
+def replace_block(readme: str, start: str, end: str, block: str) -> str:
+    i, j = readme.find(start), readme.find(end)
+    if i < 0 or j < i:
+        raise SystemExit(f"README has no {start} ... {end} section")
+    return readme[:i] + block + readme[j + len(end) :]
+
+
 def update_readme(readme: str, data: dict[str, Any]) -> str:
-    start, end = readme.find(START), readme.find(END)
-    if start < 0 or end < start:
-        raise SystemExit(f"README has no {START} ... {END} section")
-    return readme[:start] + render_readme_block(Results(data)) + readme[end + len(END) :]
+    return replace_block(readme, START, END, render_readme_block(Results(data)))
+
+
+# ---------------------------------------------------------------- agent eval
+
+
+def _frac(pair: list[int] | tuple[int, int]) -> str:
+    c, n = pair
+    return f"{100 * c / n:.1f}% ({c}/{n})" if n else "n/a"
+
+
+def _usage_cell(section: dict[str, Any]) -> str:
+    usage = section["usage"]
+    tokens = f"{usage['input_tokens']:,} in / {usage['output_tokens']:,} out"
+    if usage["tokens_estimated"]:
+        tokens += " (estimated)"
+    cost = usage.get("cost_usd")
+    return tokens + (f", ${cost:,.2f}" if cost is not None else ", cost unknown (no prices)")
+
+
+def agent_table(report: dict[str, Any]) -> str:
+    """The README's agent-eval table, from bench/agent_eval.json."""
+    lines = ["| Measurement | Result |", "|---|---|"]
+    notes = []
+    diag = report.get("diagnose")
+    if diag:
+        m = diag["meta"]
+        notes.append(
+            f"Diagnosis: model `{diag['model']}`, {m['date'][:10]}, commit "
+            f"`{(m.get('git_commit') or 'unknown')[:10]}`, {diag['cases']} cases x "
+            f"{diag['repeats']} repeat(s)."
+        )
+        lines.append(f"| Diagnosis accuracy | **{_frac([diag['correct'], diag['answers']])}** |")
+        for fault, pair in diag["by_fault"].items():
+            lines.append(f"| Accuracy on {fault} faults | {_frac(pair)} |")
+        lines.append(
+            f"| Answers rejected for citing nonexistent evidence | "
+            f"{_frac([diag['rejected_bad_citation'], diag['answers']])} |"
+        )
+        if diag.get("expected_calibration_error") is not None:
+            lines.append(
+                f"| Expected calibration error | {diag['expected_calibration_error']:.3f} |"
+            )
+        if diag.get("agreement"):
+            a = diag["agreement"]
+            lines.append(
+                f"| Same diagnosis in every repeat | {_frac([a['unanimous'], a['cases']])} |"
+            )
+        lines.append(f"| Diagnosis: median latency per case | {diag['median_latency_s']} s |")
+        lines.append(f"| Diagnosis: tokens and cost | {_usage_cell(diag)} |")
+    fix = report.get("propose")
+    if fix:
+        m = fix["meta"]
+        notes.append(
+            f"Fixes: model `{fix['model']}`, {m['date'][:10]}, commit "
+            f"`{(m.get('git_commit') or 'unknown')[:10]}`, {fix['cases']} code_bug cases x "
+            f"{fix['repeats']} repeat(s), dry run."
+        )
+        lines.append(
+            f"| Fix success (passes shadow promotion) | "
+            f"**{_frac([fix['promoted'], fix['attempts']])}** |"
+        )
+        if fix.get("failures"):
+            reasons = "; ".join(f"{k}: {v}" for k, v in fix["failures"].items())
+            lines.append(f"| Fix failure reasons | {reasons} |")
+        lines.append(f"| Fixes: tokens and cost | {_usage_cell(fix)} |")
+    note = report.get("note", "")
+    return " ".join(notes) + (f" {note}" if note else "") + "\n\n" + "\n".join(lines)
+
+
+def render_agent_block(report: dict[str, Any]) -> str:
+    return f"{AGENT_START}\n{agent_table(report)}\n{AGENT_END}"
+
+
+def update_agent_readme(readme: str, report: dict[str, Any]) -> str:
+    return replace_block(readme, AGENT_START, AGENT_END, render_agent_block(report))
+
+
+def not_real(report: dict[str, Any]) -> list[str]:
+    """Sections of an agent report that did not come from a real model."""
+    return [
+        name
+        for name in ("diagnose", "propose")
+        if name in report and not report[name].get("meta", {}).get("real_model")
+    ]
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--results", type=Path, default=BENCH / "results.json")
+    parser.add_argument("--results", type=Path, help="default: bench/results.json")
+    parser.add_argument("--agent-results", type=Path, help="default: bench/agent_eval.json")
     parser.add_argument("--readme", type=Path, default=REPO / "README.md")
     parser.add_argument("--check", action="store_true", help="exit 1 if the README is stale")
     parser.add_argument(
-        "--allow-partial", action="store_true", help="accept --quick or unfinished results"
+        "--allow-partial",
+        action="store_true",
+        help="accept --quick or unfinished benchmarks and agent evals of recorded answers",
     )
     args = parser.parse_args(argv)
-    if not args.results.exists():
-        parser.error(f"{args.results} not found: run bench/run_bench.py first")
-    data = json.loads(args.results.read_text(encoding="utf-8"))
-    meta = data["meta"]
-    if (meta.get("quick") or not meta.get("complete")) and not args.allow_partial:
+    sources = []  # (path, explicitly given)
+    for given, default in ((args.results, BENCH / "results.json"),
+                           (args.agent_results, BENCH / "agent_eval.json")):  # fmt: skip
+        path = given or default
+        if given is not None and not path.exists():
+            parser.error(f"{path} not found")
+        sources.append((path if path.exists() else None, given is not None))
+    (bench, _), (agent, agent_given) = sources
+    if bench is None and agent is None:
         parser.error(
-            f"{args.results} is from a {'--quick' if meta.get('quick') else 'unfinished'} run; "
-            "the README should quote a full run (--allow-partial to override)"
+            "no results found: run bench/run_bench.py and/or `guardian eval ... --real` first"
         )
     readme = args.readme.read_text(encoding="utf-8")
-    updated = update_readme(readme, data)
+    updated = readme
+    if bench is not None:
+        data = json.loads(bench.read_text(encoding="utf-8"))
+        meta = data["meta"]
+        if (meta.get("quick") or not meta.get("complete")) and not args.allow_partial:
+            kind = "--quick" if meta.get("quick") else "unfinished"
+            parser.error(
+                f"{bench} is from a {kind} run; "
+                "the README should quote a full run (--allow-partial to override)"
+            )
+        updated = update_readme(updated, data)
+    if agent is not None:
+        report = json.loads(agent.read_text(encoding="utf-8"))
+        fake = not_real(report)
+        if fake and not args.allow_partial:
+            parser.error(
+                f"{agent}: section(s) {fake} were not produced by a real model "
+                "(run `guardian eval ... --real`, or --allow-partial to override)"
+            )
+        if AGENT_START in updated or agent_given:
+            updated = update_agent_readme(updated, report)
+        else:
+            print(f"{args.readme} has no {AGENT_START} section; skipped {agent}")
     if args.check:
         if updated != readme:
             print(f"{args.readme} is out of date: run bench/update_readme.py", file=sys.stderr)
             return 1
         return 0
     args.readme.write_text(updated, encoding="utf-8", newline="\n")
-    print(f"updated the Results table in {args.readme}")
+    print(f"updated {args.readme}")
     return 0
 
 

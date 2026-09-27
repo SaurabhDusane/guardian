@@ -797,10 +797,13 @@ without calling an LLM. Data is minimized before it can leave the machine:
 
 - samples are capped;
 - long text is cut;
-- values of the block's `redact_columns` are masked everywhere, including inside
-  validation messages and events.
+- values of every column listed in any block's `redact_columns` are masked everywhere,
+  including inside validation messages and events.
 
-The demo redacts customer emails in `b1_ingest` and `b4_clean`.
+Redaction is pipeline-wide because a column keeps its name as data flows downstream.
+The demo declares customer emails in `b1_ingest` and `b4_clean`, and they are also
+masked in the evidence of `b2_parse` and `b3_standardize`, which carry the same columns
+without declaring them.
 
 ### The answer, and how it is checked
 
@@ -926,35 +929,85 @@ fault into the block, re-runs it and builds the bundle:
 | `code_bug` | swaps in a buggy rewrite of the block's function (new code, same input) | `code_bug` |
 
 Columns are chosen from each block's clean output and declared schema, never by name.
-The report gives:
+Event timestamps and git history are left out of eval bundles, so the same case always
+produces the same prompt.
 
+#### Running it against a real model
+
+Nothing calls a paid API unless `--real` is given. Without `--real`, the eval runs only
+on recorded answers (`--provider fake --fake-responses FILE`), and it refuses to run when
+`GUARDIAN_LLM_PROVIDER` names a real provider. Recommended order:
+
+```bash
+uv sync --extra agent
+export GUARDIAN_LLM_MODEL=<model>               # never hardcoded
+export ANTHROPIC_API_KEY=...                    # or name another variable in GUARDIAN_LLM_API_KEY_ENV
+export GUARDIAN_LLM_PRICE_INPUT_PER_MTOK=...    # USD per million tokens, for cost figures
+export GUARDIAN_LLM_PRICE_OUTPUT_PER_MTOK=...
+
+uv run guardian eval diagnose --dry-run --repeats 3     # cases, tokens and cost; no calls
+uv run guardian eval diagnose --real --repeats 3
+uv run guardian eval propose --dry-run
+uv run guardian eval propose --real
+uv run python bench/update_readme.py                    # fills the table below
+```
+
+Without the model or the key, `--real` stops with an error that names the missing
+variables.
+
+| option | what it does |
+|---|---|
+| `--real` | use the real model (the only way to make paid calls) |
+| `--dry-run` | print the number of cases, the estimated input and output tokens (expected, and an upper bound with every call retried at `max_tokens`) and the estimated cost, then exit without calling anything. Prices come from `GUARDIAN_LLM_PRICE_*_PER_MTOK` or `--price-input` / `--price-output`; they are never hardcoded. Input tokens are estimated from the exact prompts at 3.5 characters per token; output from `--expected-output-tokens` (default 2000 per call, thinking included) |
+| `--max-cases N`, `--roles R`, `--faults F`, `--block B` | narrow the cases. `--max-cases` keeps a sample drawn with `--seed` (default 0), and the seed also drives fault injection, so the same arguments always give the same cases |
+| `--repeats K` | run every case K times and report agreement across repeats |
+| `--no-cache`, `--cache-dir` | with `--real`, every answer is stored on disk (default `.guardian/llm-cache`, or `$GUARDIAN_LLM_CACHE_DIR`), keyed by model, prompt hash and repeat number. A re-run or an interrupted run resumed later pays only for calls it has not made yet, and `--dry-run` counts only those. `--no-cache` calls the model again (and stores the new answers) |
+| `--record FILE` | also save the answers of the calls made, for replay with `--provider fake` |
+
+`guardian eval diagnose` records, for every case and repeat:
+- the predicted root cause and the stated confidence;
+- whether the citations validated;
+- the latency and the tokens.
+
+It reports:
 - accuracy overall, by DAG role and by fault type;
 - a confusion matrix;
-- the rate of answers rejected for bad citations.
+- calibration: accuracy by confidence bucket, over accepted answers, and the expected
+  calibration error;
+- the rate of answers rejected for bad citations;
+- median latency, total tokens and cost (total, and paid in this run);
+- with `--repeats`, the agreement across repeats.
 
-It is written to `bench/agent_eval.md`, with a `.json` next to it. `--record FILE`
-saves the model's answers, so a real run can later be replayed offline with
-`--provider fake --fake-responses FILE`.
+`guardian eval propose` runs only on `code_bug` cases and always as a dry run: it never
+opens a pull request or touches GitHub. It reports the fix-success rate (the proposed
+version passes shadow promotion), overall and by role, with every failure reason.
 
-In pytest the eval only ever runs against `FakeClient`, with no network. The tests
-check two things:
+Both commands write their own section of `bench/agent_eval.json`. The Markdown next to
+it, `bench/agent_eval.md`, is rendered from that JSON and includes the model name, date,
+git commit, case count and repeats, with a note that every number comes from synthetic
+injected faults. Real-mode redaction works the same way as elsewhere: prompts are built
+only from evidence bundles, whose redacted columns are masked (see "The evidence
+bundle"). A test replays every fault type through the cache, for each block that
+carries a redacted column (including blocks that do not declare it), and checks that
+no redacted value appears in any cached diagnosis or fix prompt.
 
+In pytest, the eval only ever runs against `FakeClient`, with no network. The tests
+check:
 - every case really fails, and its bundle carries the signal that separates its label
   (a schema diff, a code change, or neither). A correct diagnosis is possible from the
   evidence alone, and the fault's name never appears in it;
-- the metrics, confusion matrix and rejection rate match an independent tally of
-  scripted answers: correct and wrong causes, bad citations, invalid JSON.
+- the metrics, confusion matrix, calibration, agreement and rejection rate match an
+  independent tally of scripted answers (right and wrong causes, bad citations, invalid
+  JSON);
+- the cache, the `--real` gate, dry-run counts and redaction.
 
-**Real-model results: not yet recorded.** The table is produced by:
+**Real-model results.** Filled in by `bench/update_readme.py` from
+`bench/agent_eval.json`. It refuses sections produced from recorded answers.
 
-```
-GUARDIAN_LLM_PROVIDER=anthropic GUARDIAN_LLM_MODEL=<model> ANTHROPIC_API_KEY=... \
-  uv run guardian eval diagnose --record bench/agent_eval_answers.json
-```
-
-No API key was available in the environment that built this phase, so no numbers are
-reported here rather than invented ones. Paste the summary table from
-`bench/agent_eval.md` here after the first run.
+<!-- agent-eval:start -->
+_Not recorded yet: nothing here comes from a real model until the commands above have
+been run with `--real`._
+<!-- agent-eval:end -->
 
 ## Self-healing loop
 
@@ -1092,14 +1145,20 @@ run is FRESH downstream.
 
 ### Fix success
 
-`guardian eval fix` injects a `code_bug` into **every** block and runs the whole loop
-for each: diagnose, propose (dry run), then shadow and promote with approval, the
-reviewer's part, which only the eval harness plays, on its own scratch copies. It
-reports the fraction of proposals whose new version passes shadow promotion, overall
-and by DAG role, in `bench/agent_fix_eval.md`. In pytest it runs against FakeClient
-only; the test scripts a broken fix and a misdiagnosis and checks the metric against an
-independent tally. Real-model numbers are not recorded yet, for the same reason as
-above (no API key where this was built).
+`guardian eval propose` (formerly `eval fix`, which still works) injects a `code_bug`
+into every block and runs the whole loop for each case:
+1. diagnose;
+2. propose, always as a dry run;
+3. shadow and promote with approval. This is the reviewer's part, which only the eval
+   harness plays, on a scratch copy of the case for every repeat.
+
+It reports the fraction of proposals whose new version passes shadow promotion,
+overall and by DAG role. It also groups failures by reason: misdiagnosed, diagnosis not
+trusted, no usable plan, unit tests failed, shadow check failed, or promotion refused.
+It runs against a real model only with `--real`, and it never touches GitHub. Options,
+cost control and the report file are described under "Running it against a real model"
+above. In pytest it runs against FakeClient only. The tests script a broken fix and a
+misdiagnosis, and check the metric against an independent tally.
 
 ### What the agent is NOT allowed to do
 
@@ -1491,15 +1550,14 @@ guardian/
   runner/      spec_loader, executor, cli
   adapters/dagster/  io_manager, checks, replay, definitions
   agent/       evidence bundles, LLM diagnosis (Anthropic + fake clients), fix
-               proposals (propose), safety guards, eval
+               proposals (propose), safety guards, eval, metering (LLM cache, tokens, cost)
   observability/  OpenLineage run events and OpenTelemetry spans (optional, via env)
   demo/        data_gen, schemas, blocks, faults, refactor (code_bug), pipeline.yaml
 observability/  docker-compose with Marquez, Tempo and Grafana for local viewing
 bench/
   run_bench.py  overhead / throughput / recovery / shadow benchmarks -> results.json, results.md
-  update_readme.py  README Results table <- results.json
-  agent_eval.md  written by `guardian eval diagnose` (real model; manual)
-  agent_fix_eval.md  written by `guardian eval fix` (real model; manual)
+  update_readme.py  README Results and agent-eval tables <- results.json, agent_eval.json
+  agent_eval.json / agent_eval.md  written by `guardian eval diagnose|propose --real` (manual)
   test_timings_before.md / test_timings_after.md  test suite profiling (Phase 13)
 tests/
   helpers/     blocks_by_role (DAG roles) and block profiles, shared by the tests

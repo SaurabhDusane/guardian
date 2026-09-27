@@ -23,6 +23,7 @@ from code.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
@@ -67,6 +68,7 @@ ENV_THINKING = "GUARDIAN_LLM_THINKING"
 DEFAULT_API_KEY_VAR = "ANTHROPIC_API_KEY"
 DEFAULT_MAX_TOKENS = 16000
 PROVIDERS = ("anthropic", "fake")
+REAL_PROVIDERS = ("anthropic",)  # providers that call a paid API
 
 RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -143,6 +145,16 @@ class LLMRequest:
     schema: Mapping[str, Any] = field(default_factory=lambda: RESPONSE_SCHEMA)
 
 
+@dataclass(frozen=True)
+class Usage:
+    """Tokens one call used. ``estimated``: counted offline from text length, not
+    reported by the API."""
+
+    input_tokens: int
+    output_tokens: int
+    estimated: bool = False
+
+
 @runtime_checkable
 class LLMClient(Protocol):
     model: str
@@ -178,6 +190,7 @@ class AnthropicClient:
                 ) from exc
             sdk_client = anthropic.Anthropic(api_key=api_key)
         self._client = sdk_client
+        self.last_usage: Usage | None = None  # tokens of the latest call, as billed
 
     def complete(self, request: LLMRequest) -> str:
         kwargs: dict[str, Any] = {
@@ -189,17 +202,32 @@ class AnthropicClient:
         }
         if self.thinking:
             kwargs["thinking"] = {"type": "adaptive"}
+        self.last_usage = None
         try:
             # Streamed, so a long answer cannot hit the non-streaming request timeout.
             with self._client.messages.stream(**kwargs) as stream:
                 response = stream.get_final_message()
         except Exception as exc:
             raise LLMError(_describe_api_error(exc)) from exc
+        self.last_usage = _usage(response)
         if response.stop_reason == "refusal":
             raise LLMRefusal("the model declined to answer")
         return "".join(
             getattr(block, "text", "") for block in response.content if block.type == "text"
         )
+
+
+def _usage(response: Any) -> Usage | None:
+    """Billed tokens of a response: input (including any prompt-cache reads and writes)
+    and output (including thinking)."""
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None
+    cached = sum(
+        int(getattr(usage, f, 0) or 0)
+        for f in ("cache_creation_input_tokens", "cache_read_input_tokens")
+    )
+    return Usage(int(usage.input_tokens or 0) + cached, int(usage.output_tokens or 0))
 
 
 def _describe_api_error(exc: Exception) -> str:
@@ -278,6 +306,10 @@ class RecordingClient:
         self.recorded.setdefault(request.key, []).append(text)
         return text
 
+    @property
+    def last_usage(self) -> Usage | None:
+        return getattr(self.inner, "last_usage", None)
+
     def save(self, path: Path | str) -> Path:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -340,6 +372,37 @@ def make_client(config: LLMConfig | None = None, env: Mapping[str, str] | None =
     raise LLMConfigError(
         f"unknown LLM provider {config.provider!r}; expected one of {list(PROVIDERS)}"
     )
+
+
+def make_real_client(
+    config: LLMConfig | None = None, env: Mapping[str, str] | None = None
+) -> LLMClient:
+    """The client for a real (paid) model, for an explicit opt-in such as ``--real``.
+
+    The provider defaults to anthropic. Raises LLMConfigError naming every environment
+    variable that still has to be set.
+    """
+    env = os.environ if env is None else env
+    config = config or LLMConfig.from_env(env)
+    provider = config.provider or REAL_PROVIDERS[0]
+    if provider not in REAL_PROVIDERS:
+        raise LLMConfigError(
+            f"real mode calls a real model, but {ENV_PROVIDER} (or --provider) is "
+            f"{provider!r}; use one of {list(REAL_PROVIDERS)} or leave it unset"
+        )
+    missing = []
+    if not config.model:
+        missing.append(f"{ENV_MODEL} (the model name)")
+    if not env.get(config.api_key_env):
+        where = (
+            f"; to read it from another variable, name that variable in {ENV_API_KEY_VAR}"
+            if config.api_key_env == DEFAULT_API_KEY_VAR
+            else f", named by {ENV_API_KEY_VAR}"
+        )
+        missing.append(f"{config.api_key_env} (the API key{where})")
+    if missing:
+        raise LLMConfigError("real mode needs " + " and ".join(missing))
+    return make_client(dataclasses.replace(config, provider=provider), env)
 
 
 # ------------------------------------------------------------------ diagnosis

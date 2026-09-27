@@ -126,3 +126,84 @@ def test_quick_or_unfinished_results_are_refused(tmp_path, results) -> None:
 def test_repo_readme_has_the_results_markers() -> None:
     text = (ROOT / "README.md").read_text(encoding="utf-8")
     assert text.index(update_readme.START) < text.index(update_readme.END)
+
+
+# ---------------------------------------------------------------- agent eval table
+
+
+@pytest.fixture
+def agent_report() -> dict:
+    meta = {"date": "2026-09-27T00:00:00+00:00", "git_commit": "abcdef1234567", "real_model": True}
+    usage = {"input_tokens": 120_000, "output_tokens": 30_000, "tokens_estimated": False,
+             "cost_usd": 0.81}  # fmt: skip
+    return {
+        "format": 1,
+        "note": "Synthetic faults.",
+        "diagnose": {
+            "meta": meta,
+            "model": "the-model",
+            "cases": 32,
+            "repeats": 3,
+            "answers": 96,
+            "correct": 90,
+            "by_fault": {"schema_drift": [24, 24], "code_bug": [18, 24]},
+            "rejected_bad_citation": 2,
+            "expected_calibration_error": 0.0412,
+            "agreement": {"unanimous": 30, "cases": 32},
+            "median_latency_s": 7.5,
+            "usage": usage,
+        },
+        "propose": {
+            "meta": meta,
+            "model": "the-model",
+            "cases": 8,
+            "repeats": 1,
+            "promoted": 6,
+            "attempts": 8,
+            "failures": {"unit tests failed": 2},
+            "usage": {**usage, "cost_usd": None},
+        },
+    }
+
+
+def test_agent_table_quotes_the_eval(agent_report) -> None:
+    table = update_readme.agent_table(agent_report)
+    assert "model `the-model`" in table and "`abcdef1234`" in table and "Synthetic" in table
+    assert "| Diagnosis accuracy | **93.8% (90/96)** |" in table
+    assert "| Accuracy on code_bug faults | 75.0% (18/24) |" in table
+    assert "| Answers rejected for citing nonexistent evidence | 2.1% (2/96) |" in table
+    assert "| Expected calibration error | 0.041 |" in table
+    assert "| Same diagnosis in every repeat | 93.8% (30/32) |" in table
+    assert "120,000 in / 30,000 out, $0.81" in table
+    assert "| Fix success (passes shadow promotion) | **75.0% (6/8)** |" in table
+    assert "unit tests failed: 2" in table and "cost unknown (no prices)" in table
+
+
+def test_agent_table_fills_the_readme_and_refuses_fake_answers(tmp_path, agent_report) -> None:
+    import json
+
+    readme = tmp_path / "README.md"
+    readme.write_text(
+        f"a\n{update_readme.AGENT_START}\nold\n{update_readme.AGENT_END}\nb\n", encoding="utf-8"
+    )
+    path = tmp_path / "agent_eval.json"
+    path.write_text(json.dumps(agent_report), encoding="utf-8")
+    missing = tmp_path / "none.json"
+    args = ["--agent-results", str(path), "--readme", str(readme)]
+    assert update_readme.main(args) == 0
+    text = readme.read_text(encoding="utf-8")
+    assert "old" not in text and "| Diagnosis accuracy |" in text
+    assert update_readme.main([*args, "--check"]) == 0
+
+    agent_report["propose"]["meta"] = {**agent_report["propose"]["meta"], "real_model": False}
+    path.write_text(json.dumps(agent_report), encoding="utf-8")
+    with pytest.raises(SystemExit):
+        update_readme.main(args)
+    assert update_readme.main([*args, "--allow-partial"]) == 0
+    with pytest.raises(SystemExit):
+        update_readme.main(["--agent-results", str(missing), "--readme", str(readme)])
+
+
+def test_repo_readme_has_the_agent_eval_markers() -> None:
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert text.index(update_readme.AGENT_START) < text.index(update_readme.AGENT_END)
