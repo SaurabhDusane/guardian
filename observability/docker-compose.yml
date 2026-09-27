@@ -10,13 +10,17 @@
 #   export GUARDIAN_OPENLINEAGE_URL=http://localhost:5000
 #   export GUARDIAN_OTEL=otlp OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 #
-# Image tags default to `latest`; pin them with MARQUEZ_VERSION, TEMPO_VERSION and
-# GRAFANA_VERSION for reproducible setups.
+# Every image is pinned to a released version (checked on Docker Hub, 2026-09-27);
+# override with POSTGRES_VERSION, MARQUEZ_VERSION, TEMPO_VERSION or GRAFANA_VERSION.
+# Postgres stays on 14, the major Marquez's own compose setup uses.
+#
+# scripts/observability_demo.py brings it up and runs the demo against it; the docker
+# tests (uv run pytest -m docker) check it end to end.
 name: guardian-observability
 
 services:
   marquez-db:
-    image: postgres:16
+    image: postgres:${POSTGRES_VERSION:-14.24}
     environment:
       POSTGRES_USER: marquez
       POSTGRES_PASSWORD: marquez
@@ -30,7 +34,7 @@ services:
       retries: 20
 
   marquez-api:
-    image: marquezproject/marquez:${MARQUEZ_VERSION:-latest}
+    image: marquezproject/marquez:${MARQUEZ_VERSION:-0.51.1}
     depends_on:
       marquez-db:
         condition: service_healthy
@@ -47,7 +51,7 @@ services:
       - "5001:5001"
 
   marquez-web:
-    image: marquezproject/marquez-web:${MARQUEZ_VERSION:-latest}
+    image: marquezproject/marquez-web:${MARQUEZ_VERSION:-0.51.1}
     depends_on:
       - marquez-api
     environment:
@@ -58,7 +62,7 @@ services:
       - "3000:3000"
 
   tempo:
-    image: grafana/tempo:${TEMPO_VERSION:-latest}
+    image: grafana/tempo:${TEMPO_VERSION:-3.0.3}
     command: ["-config.file=/etc/tempo.yaml"]
     volumes:
       - ./tempo.yaml:/etc/tempo.yaml:ro
@@ -68,7 +72,7 @@ services:
       - "4318:4318"  # OTLP over HTTP (Guardian exports here)
 
   grafana:
-    image: grafana/grafana:${GRAFANA_VERSION:-latest}
+    image: grafana/grafana:${GRAFANA_VERSION:-13.2.2}
     depends_on:
       - tempo
     environment:

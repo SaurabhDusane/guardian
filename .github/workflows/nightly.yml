@@ -54,3 +54,42 @@ jobs:
           name: junit-nightly-${{ matrix.os }}
           path: reports/junit-*.xml
           if-no-files-found: warn
+
+  docker-stack:
+    name: observability stack (docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          python-version: "3.11"
+      - name: Install
+        run: uv sync --locked --extra observability
+      - name: Pull the stack's images
+        run: docker compose -f observability/docker-compose.yml pull --quiet
+      # Brings up Marquez, Postgres, Tempo and Grafana, runs the demo pipeline with a
+      # fallback-protected block crashing, checks lineage and traces, tears it down.
+      - name: Docker tests
+        env:
+          GUARDIAN_DOCKER_LOGS: reports/docker-stack-logs.txt  # kept before teardown
+        run: >
+          uv run --no-sync pytest -m docker -p no:cacheprovider
+          --junitxml=reports/junit-nightly-docker.xml
+      - name: List failing tests in the job summary
+        if: failure()
+        run: uv run --no-sync python .github/scripts/junit_summary.py reports/junit-nightly-docker.xml
+      - name: Tear down (in case the tests could not)
+        if: always()
+        run: docker compose -p guardian-observability-test -f observability/docker-compose.yml down -v --remove-orphans || true
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-nightly-docker
+          path: |
+            reports/junit-*.xml
+            reports/docker-stack-logs.txt
+          if-no-files-found: warn

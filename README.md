@@ -1203,30 +1203,60 @@ are children of a `guardian.run <pipeline>` span.
 
 ### Local viewing stack
 
-[`observability/docker-compose.yml`](observability/docker-compose.yml) runs Marquez
-(API on :5000, UI on :3000), Tempo (OTLP/HTTP on :4318) and Grafana with Tempo
-preconfigured (:3001):
+[`observability/docker-compose.yml`](observability/docker-compose.yml) runs:
+
+| service | image (pinned) | ports |
+|---|---|---|
+| Marquez API, and its UI | `marquezproject/marquez:0.51.1`, `marquezproject/marquez-web:0.51.1` | API :5000 (admin :5001), UI :3000 |
+| Postgres for Marquez | `postgres:14.24` | internal |
+| Tempo | `grafana/tempo:3.0.3` | OTLP/HTTP :4318, API :3200 |
+| Grafana, Tempo preconfigured | `grafana/grafana:13.2.2` | :3001 |
+
+Each tag is the latest release on Docker Hub as of 2026-09-27, except Postgres, which
+stays on the 14 line that Marquez's own setup uses. Override a tag with
+`POSTGRES_VERSION`, `MARQUEZ_VERSION`, `TEMPO_VERSION` or `GRAFANA_VERSION`.
+
+One command brings it up, runs the demo against it (r1 clean, then r2 with the
+fallback-protected block crashing), and prints the pages to open:
 
 ```bash
-docker compose -f observability/docker-compose.yml up -d
-export GUARDIAN_OPENLINEAGE_URL=http://localhost:5000
-export GUARDIAN_OTEL=otlp OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
-uv run guardian run demo/pipeline.yaml --run-id r1
-uv run guardian run demo/pipeline.yaml --run-id r2 --fault b6_enrich:crash
-# lineage: http://localhost:3000   traces: http://localhost:3001 (Explore → Tempo)
+uv sync --extra observability
+uv run python scripts/observability_demo.py          # leaves the stack running
+uv run python scripts/observability_demo.py --down   # stop it and delete its data
 ```
 
-> **Screenshot placeholder: Marquez lineage graph.** It should show the `demo.*` jobs,
-> with `demo.b8_aggregate` on r2 reading `demo.b5_normalize` and the `guardian_input`
-> facet marking the FALLBACK read. To be captured on a machine with Docker; the build
-> environment for this phase had no Docker daemon.
->
-> **Screenshot placeholder: Grafana / Tempo trace of run r2.** It should show one
-> `guardian.run demo` span with eight `guardian.block` children, `b6_enrich` in ERROR.
+It prints three links: the Marquez lineage graph of the fallback consumer
+(`demo.b8_aggregate`), the Marquez overview of the demo's namespace, and a Grafana
+Explore link that opens the r2 trace in Tempo.
 
-The compose file is validated with `docker compose config`, and a test checks that it
-wires the services and mounted configs consistently. The stack itself has not been run
-here.
+To point your own runs at the stack:
+
+```bash
+export GUARDIAN_OPENLINEAGE_URL=http://localhost:5000
+export GUARDIAN_OTEL=otlp OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+```
+
+> **Screenshot placeholder: Marquez lineage graph.** `demo.b8_aggregate` on r2 reading
+> `demo.b5_normalize` through the fallback. Capture it with the script's first link.
+>
+> **Screenshot placeholder: Grafana / Tempo trace of run r2.** One `guardian.run demo`
+> span with eight `guardian.block` children, `b6_enrich` in ERROR. Capture it with the
+> script's third link.
+
+**End-to-end test.** [`tests/docker/test_observability_stack.py`](tests/docker/test_observability_stack.py)
+(`uv run pytest -m docker`) runs against the real stack. It brings the stack up under
+its own compose project and waits for every service to be healthy, with a timeout. It
+then runs the same demo and checks that:
+
+- Marquez has the pipeline job and every block job;
+- the fallback consumer's r2 run read the fallback source, and its stored OpenLineage
+  event carries the FALLBACK input facet;
+- Tempo returns the r2 trace with exactly one span per block and ERROR on the crashed
+  block only.
+
+The stack is always torn down, volumes included, even when a check fails. The nightly
+workflow runs it on Ubuntu (`docker-stack` job) and keeps the services' logs as an
+artifact.
 
 **How it is tested.** The tests use in-memory exporters (`tests/observability/`):
 - a memory transport and the OTel SDK's `InMemorySpanExporter`, run under both the
@@ -1399,7 +1429,7 @@ Tests are split by markers (declared in `pyproject.toml`):
 | `uv run pytest -m slow` | only the slow tests |
 | `uv run pytest -m dagster` | only the Dagster tests |
 | `GUARDIAN_LLM_LIVE=1 GUARDIAN_LLM_PROVIDER=anthropic GUARDIAN_LLM_MODEL=... ANTHROPIC_API_KEY=... uv run pytest -m llm` | the real-model contract test |
-| `uv run pytest -m docker` | the Docker stack tests (the stack test skips without a daemon) |
+| `uv run pytest -m docker` | the observability stack end to end (`tests/docker/`; skips without a Docker daemon) |
 
 A later `-m` replaces the default one.
 
@@ -1408,8 +1438,8 @@ A later `-m` replaces the default one.
   `ruff format --check`), then runs the default suite with `-n auto` on Ubuntu and
   Windows × Python 3.11 and 3.12, uploading a JUnit report per job.
 - `nightly.yml` runs the full suite (`-m "not llm and not docker"`) on Ubuntu and
-  Windows every night, and on demand. When it fails, it lists the failing tests in the
-  job summary.
+  Windows every night, and on demand, plus the `docker` tests on Ubuntu. When it fails,
+  it lists the failing tests in the job summary.
 
 `llm` tests never run in CI and no API key is used. The scheduled nightly run fires
 only on the repository's default branch.
