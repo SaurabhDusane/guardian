@@ -1,0 +1,6 @@
+# Check out text files with LF everywhere (including Windows CI runners): the agent's
+# spec edits and patch checks, and snapshot tests of rendered text, assume LF.
+* text=auto eol=lf
+*.parquet binary
+*.duckdb binary
+*.png binary

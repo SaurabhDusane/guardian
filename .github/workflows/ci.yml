@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Belt and braces: the marker filters already exclude llm tests; this makes them skip
+  # even if a filter changes. CI never has (or needs) an LLM API key.
+  GUARDIAN_LLM_LIVE: "0"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          python-version: "3.11"
+      - name: Install dev tools
+        run: uv sync --locked --only-group dev
+      - name: ruff check
+        run: uv run --no-sync ruff check .
+      - name: ruff format --check
+        run: uv run --no-sync ruff format --check .
+
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Allow long paths (git worktrees under the Windows temp directory)
+        if: runner.os == 'Windows'
+        run: git config --global core.longpaths true
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: uv sync --locked --extra dagster
+      # The default fast suite (pyproject addopts: -m "not slow and not llm and not docker").
+      # llm tests are never selected in CI, and no API key is needed or provided.
+      - name: Default test suite
+        run: >
+          uv run --no-sync pytest -n auto -p no:cacheprovider
+          --junitxml=reports/junit-${{ matrix.os }}-py${{ matrix.python }}.xml
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ matrix.os }}-py${{ matrix.python }}
+          path: reports/junit-*.xml
+          if-no-files-found: warn

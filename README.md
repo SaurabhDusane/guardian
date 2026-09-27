@@ -1,5 +1,8 @@
 # Guardian
 
+[![CI](https://github.com/SaurabhDusane/guardian/actions/workflows/ci.yml/badge.svg)](https://github.com/SaurabhDusane/guardian/actions/workflows/ci.yml)
+[![Nightly](https://github.com/SaurabhDusane/guardian/actions/workflows/nightly.yml/badge.svg)](https://github.com/SaurabhDusane/guardian/actions/workflows/nightly.yml)
+
 Guardian is a self-healing maintenance layer that attaches to an existing ETL pipeline.
 It snapshots every block's output and validates it. When a block goes bad, the
 pipeline keeps flowing instead of stopping: consumers are rolled back to the
@@ -1399,6 +1402,17 @@ Tests are split by markers (declared in `pyproject.toml`):
 | `uv run pytest -m docker` | the Docker stack tests (the stack test skips without a daemon) |
 
 A later `-m` replaces the default one.
+
+**CI** ([`.github/workflows`](.github/workflows)):
+- `ci.yml` runs on every push and pull request. It lints (`ruff check`,
+  `ruff format --check`), then runs the default suite with `-n auto` on Ubuntu and
+  Windows × Python 3.11 and 3.12, uploading a JUnit report per job.
+- `nightly.yml` runs the full suite (`-m "not llm and not docker"`) on Ubuntu and
+  Windows every night, and on demand. When it fails, it lists the failing tests in the
+  job summary.
+
+`llm` tests never run in CI and no API key is used. The scheduled nightly run fires
+only on the repository's default branch.
 
 **Coverage in the default run.** Role- and block-parametrized tests keep one
 representative there: the `fallback_protected` role, or its block. The other roles and

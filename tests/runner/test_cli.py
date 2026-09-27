@@ -285,7 +285,9 @@ def test_diagnose_command(tmp_path) -> None:
     )
     assert result.exit_code == 0, result.output
     assert "root cause: code_bug" in result.output and "accepted" in result.output
-    saved = json.loads((tmp_path / "diagnoses" / "b4_clean" / "r2" / "diagnosis.json").read_text())
+    saved = json.loads(
+        (tmp_path / "diagnoses" / "b4_clean" / "r2" / "diagnosis.json").read_text(encoding="utf-8")
+    )
     assert saved["root_cause"] == "code_bug"
 
     for args, code, text in (

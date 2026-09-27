@@ -1,0 +1,56 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"  # every night at 03:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Belt and braces: the marker filters already exclude llm tests; this makes them skip
+  # even if a filter changes. CI never has (or needs) an LLM API key.
+  GUARDIAN_LLM_LIVE: "0"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  full-suite:
+    name: full suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Allow long paths (git worktrees under the Windows temp directory)
+        if: runner.os == 'Windows'
+        run: git config --global core.longpaths true
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          python-version: "3.11"
+      - name: Install
+        run: uv sync --locked --extra dagster --extra agent --extra observability
+      # Everything except tests that need an LLM API key (llm) or a Docker daemon
+      # (docker): no secret is used or required.
+      - name: Full test suite
+        run: >
+          uv run --no-sync pytest -m "not llm and not docker" -n auto -p no:cacheprovider
+          --junitxml=reports/junit-nightly-${{ matrix.os }}.xml
+      - name: List failing tests in the job summary
+        if: failure()
+        run: uv run --no-sync python .github/scripts/junit_summary.py reports/junit-nightly-${{ matrix.os }}.xml
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-nightly-${{ matrix.os }}
+          path: reports/junit-*.xml
+          if-no-files-found: warn
