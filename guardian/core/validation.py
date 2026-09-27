@@ -43,6 +43,8 @@ class ValidationResult:
 
 @runtime_checkable
 class Validator(Protocol):
+    """Splits a frame into good and bad rows (with rules and reasons)."""
+
     def validate(self, df: pd.DataFrame) -> ValidationResult: ...
 
 

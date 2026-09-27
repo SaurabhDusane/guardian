@@ -11,6 +11,8 @@ REPLAY_IO_MANAGER_KEY = "guardian_replay_io"
 
 
 def build_replay_job() -> dg.JobDefinition:
+    """A job that replays one block's quarantine; the block comes from the run config."""
+
     @dg.op(
         name="guardian_replay_op",
         config_schema={"block": str},
@@ -38,4 +40,5 @@ def build_replay_job() -> dg.JobDefinition:
 
 
 def replay_run_config(block: str) -> dict:
+    """Run config selecting ``block`` for the replay job."""
     return {"ops": {"guardian_replay_op": {"config": {"block": block}}}}

@@ -719,12 +719,9 @@ def build_evidence(
 
 
 def _scrub_item(redactor: Redactor, item: EvidenceItem) -> dict[str, Any]:
-    """Mask redacted values in an item's free text.
-
-    Structured values (column stats, sample rows) were already masked column by column,
-    so a non-redacted column keeps its own values even if one also occurs in a redacted
-    column; only text that may embed values (messages, rule names, events) is scrubbed.
-    """
+    """Mask redacted values in an item's free text."""
+    # Structured values were masked column by column already, so a non-redacted column
+    # keeps its values even if one also occurs in a redacted column.
     if item.kind == "column_stats":
         return item.data
     if item.kind == "quarantine_sample":
@@ -775,11 +772,10 @@ def _inputs(g: Guardian, block: str, run_id: str) -> list[dict[str, Any]]:
 
 
 def _recent_events(g: Guardian, block: str, run_id: str, limit: int) -> list[Event]:
-    """Up to ``limit`` events for ``block`` and its upstreams, up to the diagnosed run.
+    """Up to ``limit`` events of the block and its upstreams, up to ``run_id``, in time order.
 
-    The block's own events on the run come first, then notable events (errors,
-    rollbacks, quarantines, reroutes, status changes, replays), then the rest, each
-    group most recent first; the chosen events are returned in time order.
+    Chosen by priority: the block's own events on the run, then notable ones (errors,
+    rollbacks, quarantines, reroutes, status changes, replays), then the rest.
     """
     scope = {block, *ancestors(g.spec, block)}
     events = [

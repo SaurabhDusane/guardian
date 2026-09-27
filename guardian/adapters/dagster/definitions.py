@@ -91,6 +91,7 @@ def definitions_for(
     root: Path | str = DEFAULT_STORAGE_ROOT,
     registry: Mapping[str, Any] | None = None,
 ) -> dg.Definitions:
+    """Definitions for a spec (or spec file) with a Guardian on ``root``."""
     if not isinstance(spec, PipelineSpec):
         spec = load_spec(spec)
     # Blocks with auto_diagnose get an advisory diagnosis after a ROLLBACK (core calls

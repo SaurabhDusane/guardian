@@ -814,8 +814,7 @@ def _fix_case(
 def _simulate_reviewer(
     spec: PipelineSpec, case: EvalCase, root: Path, proposal: Any
 ) -> tuple[bool, str]:
-    """What a reviewer does after merging: shadow the new version while the buggy one
-    is still live, then promote it with approval. Runs only on the case's copy."""
+    """Shadow the proposed version on the case's copy, then promote it with approval."""
     from guardian.agent.propose import with_proposed_version
     from guardian.core.guardian import PromotionError
 

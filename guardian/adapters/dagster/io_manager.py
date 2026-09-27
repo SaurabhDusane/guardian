@@ -63,6 +63,8 @@ def shadow_metadata(run: ShadowRun) -> dict[str, Any]:
 
 
 class GuardianIOManager(dg.IOManager):
+    """Routes every asset output and input through Guardian (see the module docstring)."""
+
     def __init__(self, guardian: Guardian) -> None:
         self.guardian = guardian
 

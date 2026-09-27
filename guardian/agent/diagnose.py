@@ -218,8 +218,7 @@ class AnthropicClient:
 
 
 def _usage(response: Any) -> Usage | None:
-    """Billed tokens of a response: input (including any prompt-cache reads and writes)
-    and output (including thinking)."""
+    """Billed tokens: input with prompt-cache reads and writes, output with thinking."""
     usage = getattr(response, "usage", None)
     if usage is None:
         return None

@@ -28,11 +28,15 @@ class SnapshotNotFoundError(SnapshotError, KeyError):
 
 @runtime_checkable
 class SnapshotStore(Protocol):
+    """Immutable snapshots keyed by (block, run_id), plus a last-good pointer per block."""
+
     def write(self, block: str, run_id: str, df: pd.DataFrame) -> DataRef:
         """Persist ``df`` as the immutable snapshot (block, run_id)."""
         ...
 
-    def read(self, block: str, run_id: str) -> pd.DataFrame: ...
+    def read(self, block: str, run_id: str) -> pd.DataFrame:
+        """Raise SnapshotNotFoundError if there is no such snapshot."""
+        ...
 
     def exists(self, block: str, run_id: str) -> bool: ...
 
@@ -40,7 +44,9 @@ class SnapshotStore(Protocol):
         """Run ids with a snapshot for ``block``, oldest first."""
         ...
 
-    def mark_last_good(self, block: str, run_id: str) -> DataRef: ...
+    def mark_last_good(self, block: str, run_id: str) -> DataRef:
+        """Point ``block``'s last-good at an existing snapshot."""
+        ...
 
     def last_good(self, block: str) -> DataRef | None: ...
 

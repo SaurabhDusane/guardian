@@ -100,6 +100,8 @@ class PromotionResult:
 
 @runtime_checkable
 class BlockStatusStore(Protocol):
+    """Each block's HEALTHY / DEGRADED / OUT status."""
+
     def get(self, block: str) -> BlockStatus: ...
 
     def set(self, block: str, status: BlockStatus) -> None: ...
@@ -148,6 +150,15 @@ def _in_session(method: Callable[..., Any]) -> Callable[..., Any]:
 
 
 class Guardian:
+    """The maintenance layer for one pipeline spec and one storage root.
+
+    Every runner and adapter goes through this facade: ``on_output`` / ``on_crash``
+    decide PASS or ROLLBACK for a block's output, ``resolve_input`` picks the safe
+    snapshot a consumer reads, ``replay`` recovers quarantined rows, and the shadow
+    methods run and promote candidate versions. Use it as a context manager (or call
+    ``close``) to release the storage files.
+    """
+
     def __init__(
         self,
         spec: PipelineSpec,
@@ -275,6 +286,7 @@ class Guardian:
     # ------------------------------------------------------------------ status
 
     def status(self, block: str) -> BlockStatus:
+        """HEALTHY, DEGRADED or OUT (blocks never marked are HEALTHY)."""
         self.spec.block(block)
         return self.statuses.get(block)
 
@@ -455,6 +467,7 @@ class Guardian:
 
     @_in_session
     def on_crash(self, block: str, run_id: str, error: BaseException) -> Decision:
+        """ROLLBACK with reason "crash": nothing is promoted and the block is DEGRADED."""
         self.spec.block(block)
         self.events.emit(
             EventKind.ERROR,
@@ -469,6 +482,13 @@ class Guardian:
 
     @_in_session
     def on_output(self, block: str, run_id: str, df: pd.DataFrame) -> Decision:
+        """Validate ``df`` and decide.
+
+        Bad rows go to quarantine. PASS (the good rows become the block's last-good
+        snapshot) when the bad-row fraction is at most ``quarantine_threshold``;
+        ROLLBACK otherwise, or on a schema-level failure or a drift FAIL: nothing is
+        promoted, every row is quarantined and the block is DEGRADED.
+        """
         spec = self.spec.block(block)
         validate_name(run_id, "run_id")
         total = len(df)
@@ -606,6 +626,14 @@ class Guardian:
     # ------------------------------------------------------------------ inputs
 
     def resolve_input(self, block: str, upstream: str, run_id: str | None = None) -> DataRef:
+        """The snapshot ``block`` reads for ``upstream`` right now.
+
+        A HEALTHY upstream gives its last-good snapshot. A DEGRADED or OUT one gives
+        the fallback source's last-good snapshot (with the edge's adapter) if a
+        fallback edge exists and its source is HEALTHY, else the upstream's own
+        last-good snapshot (stale). Raises NoSafeInputError if there is none. Every
+        resolution emits an event naming the source used.
+        """
         try:
             ref = plan_input(self.spec, block, upstream, self.status, self.snapshots.last_good)
         except NoSafeInputError as exc:
@@ -700,12 +728,9 @@ class Guardian:
         *,
         rows: tuple[int, int, int] | None = None,
     ):
-        """Record what ``block`` did on ``run_id`` and announce it (BLOCK_OUTCOME).
-
-        ``rows`` is (output rows, promoted, quarantined). Every outcome of every runner
-        passes through here, which makes BLOCK_OUTCOME the one event observability
-        exporters need to describe a block run.
-        """
+        """Record a block run and emit BLOCK_OUTCOME; ``rows`` is (out, promoted, quarantined)."""
+        # Every outcome of every runner passes through here, so BLOCK_OUTCOME is the one
+        # event observability exporters need to describe a block run.
         code = self.code_fingerprint(block)
         status = self.status(block).value
         version = self.active_version(block)
@@ -756,6 +781,7 @@ class Guardian:
         return df
 
     def load_input(self, block: str, upstream: str, run_id: str | None = None) -> pd.DataFrame:
+        """``read(resolve_input(...))``."""
         return self.read(self.resolve_input(block, upstream, run_id))
 
     # ------------------------------------------------------------------ replay
@@ -772,24 +798,15 @@ class Guardian:
     ) -> ReplayResult:
         """Re-run ``block``'s function on its QUARANTINED records.
 
-        Rows whose output passes validation are "recovered" and their records marked
-        REPLAYED; the rest stay QUARANTINED. The block function must preserve the index
-        (row-wise transforms do), which is how output rows map back to records.
+        Records whose output passes validation are marked REPLAYED (never deleted); the
+        rest stay QUARANTINED. Output rows map back to records by index, so the block
+        function must preserve it. With a ``merge_key``, recovered rows are upserted
+        into a copy of the last-good snapshot (newest record wins) and the result is
+        promoted; without one they go to a separate snapshot and a WARN is emitted.
 
-        - With a ``merge_key``: recovered rows are upserted into a copy of the last-good
-          snapshot (recovered rows win on key conflict; among recovered rows the newest
-          quarantine record wins). The result is written and promoted to last-good.
-        - Without one: nothing is merged. Recovered rows are written to their own
-          snapshot, last-good is left alone, and a WARN event is emitted.
-
-        Idempotent: only QUARANTINED records are replayed, so a second call finds
-        nothing to do and changes nothing. If a replay dies after writing its snapshot
-        but before marking records, re-running it upserts the same keys again.
-
-        ``version`` replays through that version instead of the live one. With
-        ``promote=False`` the upserted snapshot is written but neither made last-good
-        nor used to mark the block HEALTHY (a promotion does that when it completes).
-        ``on_snapshot`` is called with the written snapshot before records are marked.
+        Idempotent: a second call finds nothing QUARANTINED. ``version`` replays through
+        another version; ``promote=False`` leaves last-good and the status to the caller
+        (a promotion); ``on_snapshot`` sees the written snapshot before records are marked.
         """
         spec = self.spec.block(block)
         run_id = run_id or new_run_id("replay")
@@ -885,8 +902,7 @@ class Guardian:
         ids: list[int],
         passing: list[Any],
     ) -> Provenance:
-        """A replay's quality is the worst of its base snapshot and the runs its
-        recovered records came from."""
+        """Worst quality of the base snapshot and the runs the recovered records came from."""
         passing_ids = set(passing)
         source_runs = sorted(
             {
@@ -1271,10 +1287,8 @@ class Guardian:
 
 
 def _as_validator(schema: Any) -> Validator:
-    """Wrap pandera schemas/models; accept ready-made Validator objects as-is.
-
-    Pandera schemas are checked first because they also have a ``validate`` method.
-    """
+    """Wrap a pandera schema or model; accept a Validator as-is."""
+    # Pandera first: its schemas also have a ``validate`` method.
     try:
         return PanderaValidator(schema)
     except TypeError:

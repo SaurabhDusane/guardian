@@ -123,6 +123,8 @@ class BlockRun:
 
 @runtime_checkable
 class ProvenanceStore(Protocol):
+    """Where each snapshot's inputs came from, and what each block run did."""
+
     def record(self, provenance: Provenance) -> None:
         """Store a snapshot's provenance (first write wins: records are immutable)."""
         ...

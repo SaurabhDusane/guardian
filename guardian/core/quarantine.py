@@ -77,6 +77,8 @@ def entries_from_frame(
 
 @runtime_checkable
 class QuarantineStore(Protocol):
+    """Rows held back from a block's output, each with its rule, reason and original row."""
+
     def add(self, entries: Sequence[QuarantineEntry]) -> list[int]:
         """Insert entries with status QUARANTINED; return their ids."""
         ...
@@ -86,7 +88,9 @@ class QuarantineStore(Protocol):
         block: str | None = None,
         status: QuarantineStatus | None = None,
         run_id: str | None = None,
-    ) -> list[QuarantineRecord]: ...
+    ) -> list[QuarantineRecord]:
+        """Records matching every filter given, oldest first."""
+        ...
 
     def count(self, block: str | None = None, status: QuarantineStatus | None = None) -> int: ...
 

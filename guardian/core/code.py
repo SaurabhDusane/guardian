@@ -32,12 +32,9 @@ class CodeFingerprint:
 
 
 def _implementation(fn: Any) -> Any:
-    """The function doing the work: partials unwrapped, then ``__wrapped__`` followed.
-
-    Wrappers made with ``functools.wraps`` (e.g. output fault injection) resolve to
-    the function they wrap, so they do not count as a code change; a function that
-    replaces another without ``wraps`` is a different implementation.
-    """
+    """The function doing the work: partials unwrapped, then ``__wrapped__`` followed."""
+    # A functools.wraps wrapper (e.g. output fault injection) is not a code change; a
+    # replacement written without wraps is.
     while isinstance(fn, functools.partial):
         fn = fn.func
     with contextlib.suppress(ValueError):  # a __wrapped__ cycle
