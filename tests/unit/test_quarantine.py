@@ -8,10 +8,13 @@ from guardian.core.quarantine import (
     DuckDBQuarantineStore,
     QuarantineEntry,
     QuarantineStore,
-    entries_from_frame,
     restore_dtypes,
     rows_to_payloads,
 )
+
+
+def entries(block: str, run_id: str, df: pd.DataFrame, rule: str, reason: str):
+    return [QuarantineEntry(block, run_id, rule, reason, p) for p in rows_to_payloads(df)]
 
 
 @pytest.fixture
@@ -38,7 +41,7 @@ def test_rows_to_payloads_handles_nan_and_dates() -> None:
 
 
 def test_add_and_list_carries_all_fields(store, bad_rows) -> None:
-    ids = store.add(entries_from_frame("b1", "r1", bad_rows, "amount_positive", "amount < 0"))
+    ids = store.add(entries("b1", "r1", bad_rows, "amount_positive", "amount < 0"))
     assert len(ids) == 2 and ids[0] < ids[1]
     records = store.list()
     assert [r.id for r in records] == ids
@@ -74,9 +77,9 @@ def test_add_rejects_malformed_payload(store) -> None:
 
 
 def test_filters(store, bad_rows) -> None:
-    store.add(entries_from_frame("b1", "r1", bad_rows, "rule", "why"))
-    store.add(entries_from_frame("b1", "r2", bad_rows.head(1), "rule", "why"))
-    store.add(entries_from_frame("b2", "r1", bad_rows, "rule", "why"))
+    store.add(entries("b1", "r1", bad_rows, "rule", "why"))
+    store.add(entries("b1", "r2", bad_rows.head(1), "rule", "why"))
+    store.add(entries("b2", "r1", bad_rows, "rule", "why"))
     assert store.count() == 5
     assert store.count(block="b1") == 3
     assert len(store.list(block="b1", run_id="r2")) == 1
@@ -84,7 +87,7 @@ def test_filters(store, bad_rows) -> None:
 
 
 def test_load_frame_reconstructs_rows(store, bad_rows) -> None:
-    store.add(entries_from_frame("b1", "r1", bad_rows, "rule", "why"))
+    store.add(entries("b1", "r1", bad_rows, "rule", "why"))
     ids, frame = store.load_frame("b1")
     assert len(ids) == 2
     assert list(frame.columns) == sorted(bad_rows.columns)
@@ -94,7 +97,7 @@ def test_load_frame_reconstructs_rows(store, bad_rows) -> None:
 
 
 def test_mark_replayed_never_deletes(store, bad_rows) -> None:
-    ids = store.add(entries_from_frame("b1", "r1", bad_rows, "rule", "why"))
+    ids = store.add(entries("b1", "r1", bad_rows, "rule", "why"))
     assert store.mark_replayed([ids[0]], replay_run_id="replay-1") == 1
     assert store.count() == 2  # nothing deleted
     replayed = store.list(status=QuarantineStatus.REPLAYED)
@@ -110,7 +113,7 @@ def test_mark_replayed_never_deletes(store, bad_rows) -> None:
 
 
 def test_persists_across_instances(tmp_path, bad_rows) -> None:
-    DuckDBQuarantineStore(tmp_path).add(entries_from_frame("b1", "r1", bad_rows, "r", "w"))
+    DuckDBQuarantineStore(tmp_path).add(entries("b1", "r1", bad_rows, "r", "w"))
     assert DuckDBQuarantineStore(tmp_path).count(block="b1") == 2
 
 
@@ -123,7 +126,7 @@ def test_restore_dtypes_inverts_payload_roundtrip(store) -> None:
             "s": ["a", "b"],
         }
     )
-    store.add(entries_from_frame("b1", "r1", original, "rule", "why"))
+    store.add(entries("b1", "r1", original, "rule", "why"))
     _, frame = store.load_frame("b1")
     restored = restore_dtypes(frame[list(original.columns)], dict(original.dtypes))
     pd.testing.assert_frame_equal(restored, original, check_dtype=True)

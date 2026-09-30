@@ -40,10 +40,6 @@ class SnapshotStore(Protocol):
 
     def exists(self, block: str, run_id: str) -> bool: ...
 
-    def list_runs(self, block: str) -> list[str]:
-        """Run ids with a snapshot for ``block``, oldest first."""
-        ...
-
     def mark_last_good(self, block: str, run_id: str) -> DataRef:
         """Point ``block``'s last-good at an existing snapshot."""
         ...
@@ -98,14 +94,6 @@ class LocalParquetSnapshotStore:
 
     def exists(self, block: str, run_id: str) -> bool:
         return self._path(block, run_id).exists()
-
-    def list_runs(self, block: str) -> list[str]:
-        block_dir = self._block_dir(block)
-        if not block_dir.exists():
-            return []
-        files = [p for p in block_dir.glob("*.parquet") if not p.name.startswith(".")]
-        files.sort(key=lambda p: (p.stat().st_mtime_ns, p.stem))
-        return [p.stem for p in files]
 
     def mark_last_good(self, block: str, run_id: str) -> DataRef:
         if not self.exists(block, run_id):

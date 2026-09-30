@@ -1109,11 +1109,11 @@ class Guardian:
             and self.versions.pending(block) is None
             and auto_promotable(self.shadows.runs(shadow.id), policy)
         ):
-            self.promote(block, reason="auto")
+            self.shadow_promote(block, reason="auto")
         return run
 
     @_in_session
-    def promote(
+    def shadow_promote(
         self,
         block: str,
         *,
@@ -1128,7 +1128,7 @@ class Guardian:
 
         Crash-safe and resumable: the promotion is recorded as PROMOTING first; the
         new version becomes active, the replay snapshot last-good and the block
-        HEALTHY only at the end. If anything fails in between, calling ``promote``
+        HEALTHY only at the end. If anything fails in between, calling ``shadow_promote``
         again resumes it (the replay is idempotent via merge_key).
         """
         self.spec.block(block)
@@ -1245,7 +1245,7 @@ class Guardian:
         )
 
     @_in_session
-    def rollback_version(self, block: str) -> Promotion:
+    def shadow_rollback(self, block: str) -> Promotion:
         """Make the previous version active again. No snapshot is rewritten.
 
         If the block's last-good snapshot is still the one its last promotion's replay

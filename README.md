@@ -140,7 +140,7 @@ flowchart LR
 
     subgraph core["guardian.core (never imports dagster)"]
         direction TB
-        facade["Guardian facade<br/>begin/complete_block · on_output · on_crash<br/>resolve_input · replay · set_block_status<br/>shadow · promote · rollback"]
+        facade["Guardian facade<br/>begin/complete_block · on_output · on_crash<br/>resolve_input · replay · set_block_status<br/>shadow_start · shadow_promote · shadow_rollback"]
         validation["validation<br/>Pandera: good / bad rows"]
         planner["planner<br/>which snapshot to read"]
         facade --> validation

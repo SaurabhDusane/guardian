@@ -54,8 +54,8 @@ class AgentPolicyError(GuardianError):
 
 _FORBIDDEN_GUARDIAN = frozenset(
     {
-        "promote",
-        "rollback_version",
+        "shadow_promote",
+        "shadow_rollback",
         "shadow_start",
         "shadow_stop",
         "run_shadow",

@@ -44,7 +44,7 @@ def test_agent_code_never_promotes_merges_or_changes_state() -> None:
 
     root = Path(__file__).parents[2] / "guardian" / "agent"
     calls = re.compile(
-        r"\.(promote|shadow_start|shadow_stop|rollback_version|set_block_status|replay|"
+        r"\.(shadow_promote|shadow_start|shadow_stop|shadow_rollback|set_block_status|replay|"
         r"begin_promotion|complete_promotion)\("
     )
     merges = re.compile(r"/merge\b|merge_pull|\"merge\"|'merge'")
@@ -52,7 +52,7 @@ def test_agent_code_never_promotes_merges_or_changes_state() -> None:
         text = path.read_text(encoding="utf-8")
         found_calls = calls.findall(text)
         if path.name == "eval.py":
-            assert found_calls == ["shadow_start", "promote"], found_calls
+            assert found_calls == ["shadow_start", "shadow_promote"], found_calls
         else:
             assert not found_calls, (path.name, found_calls)
         assert path.name == "safety.py" or not merges.findall(text), path.name

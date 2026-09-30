@@ -236,9 +236,3 @@ class EventLogger:
             )
             for r in rows
         ]
-
-    def read_jsonl(self) -> list[dict[str, Any]]:
-        if not self.jsonl_path.exists():
-            return []
-        with self.jsonl_path.open(encoding="utf-8") as fh:
-            return [json.loads(line) for line in fh if line.strip()]

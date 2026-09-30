@@ -62,15 +62,6 @@ def test_read_missing_raises(store) -> None:
     assert not store.exists("b1", "nope")
 
 
-def test_list_runs(store, df) -> None:
-    assert store.list_runs("b1") == []
-    store.write("b1", "r1", df)
-    store.write("b1", "r2", df)
-    store.write("b2", "r1", df)
-    assert store.list_runs("b1") == ["r1", "r2"]
-    assert store.list_runs("b2") == ["r1"]
-
-
 def test_no_temp_files_left_behind(store, df, tmp_path) -> None:
     store.write("b1", "r1", df)
     leftovers = [p for p in (tmp_path / "snapshots" / "b1").iterdir() if p.suffix == ".tmp"]

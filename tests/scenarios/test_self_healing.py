@@ -75,8 +75,8 @@ def test_self_healing_loop_from_bad_deploy_to_fresh_output(
 
     # It would be approved: promotion needs (and gets) an explicit approval.
     with pytest.raises(PromotionError, match="needs approval"):
-        runner.promote(block)
-    result = runner.promote(block, approve=True)
+        runner.shadow_promote(block)
+    result = runner.shadow_promote(block, approve=True)
     assert (result.to_version, runner.active_version(block)) == (proposal.version,) * 2
     assert runner.status(block) is BlockStatus.HEALTHY
 

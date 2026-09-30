@@ -7,11 +7,19 @@ import pytest
 from guardian.core.events import ALWAYS_LOGGED, EventKind, EventLogger
 
 
+def jsonl(root: Path) -> list[dict]:
+    """The events written to ``events.jsonl``."""
+    path = root / "events.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
 def test_emit_writes_jsonl_and_duckdb(tmp_path) -> None:
     log = EventLogger(tmp_path)
     event = log.emit(EventKind.SNAPSHOT, block="b1", run_id="r1", rows=np.int64(3), path=Path("x"))
     assert event is not None
-    lines = log.read_jsonl()
+    lines = jsonl(tmp_path)
     assert len(lines) == 1
     assert lines[0]["event_id"] == event.event_id
     assert lines[0]["kind"] == "SNAPSHOT"
@@ -47,7 +55,7 @@ def test_sample_rate_zero_drops_routine_but_keeps_critical(tmp_path) -> None:
     assert kept == set(ALWAYS_LOGGED)
     assert len(log.query()) == 5 * len(ALWAYS_LOGGED)
     assert log.sampled_out == 5 * (len(EventKind) - len(ALWAYS_LOGGED))
-    assert len(log.read_jsonl()) == len(log.query())
+    assert len(jsonl(tmp_path)) == len(log.query())
 
 
 def test_always_logged_set_matches_contract() -> None:
@@ -96,7 +104,7 @@ def test_appends_across_instances(tmp_path) -> None:
         first.emit(EventKind.ERROR, message="boom")
     log = EventLogger(tmp_path)
     log.emit(EventKind.ROLLBACK)
-    assert [e["kind"] for e in log.read_jsonl()] == ["ERROR", "ROLLBACK"]
+    assert [e["kind"] for e in jsonl(tmp_path)] == ["ERROR", "ROLLBACK"]
     assert len(log.query()) == 2
 
 

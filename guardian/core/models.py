@@ -10,7 +10,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
@@ -359,17 +359,6 @@ class Decision:
     @property
     def bad_fraction(self) -> float:
         return self.bad_rows / self.total_rows if self.total_rows else 0.0
-
-
-@dataclass(frozen=True)
-class RunContext:
-    run_id: str
-    storage_root: Path = DEFAULT_STORAGE_ROOT
-    started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-
-    def __post_init__(self) -> None:
-        validate_name(self.run_id, "run_id")
-        object.__setattr__(self, "storage_root", Path(self.storage_root))
 
 
 @dataclass(frozen=True)

@@ -17,7 +17,7 @@ The core must never import dagster. Adapters depend on core, never the reverse.
 ```
 guardian/
   core/
-    models.py        # BlockSpec, PipelineSpec, FallbackEdge, Decision, DataRef, RunContext
+    models.py        # BlockSpec, PipelineSpec, FallbackEdge, Decision, DataRef
     validation.py    # Validator protocol + Pandera-based implementation
     snapshots.py     # SnapshotStore protocol + LocalParquetSnapshotStore
     quarantine.py    # QuarantineStore protocol + DuckDBQuarantineStore
@@ -138,7 +138,9 @@ blocks:
 - A source block has no inputs to resolve; when it is DEGRADED/OUT, its dependents follow
   the normal rules (fallback edge if one exists and is healthy, else stale).
 
-## v2 invariants (apply to every phase from 7 on)
+## v2 invariants
+These apply to shadow promotion and every feature built after it: provenance, the diagnosis
+and fix agent, drift detection, observability, and anything added later.
 - Consumers NEVER read candidate (shadow) snapshots. Only promoted snapshots are visible
   to resolve_input.
 - A candidate always reads the LIVE (promoted) inputs, even if an upstream block also has a

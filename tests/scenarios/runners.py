@@ -186,7 +186,7 @@ class ScenarioRunner(abc.ABC):
         with self._acting_guardian() as g:
             g.shadow_stop(block)
 
-    def promote(
+    def shadow_promote(
         self, block: str, *, approve: bool = False, interrupt: str | None = None
     ) -> PromotionResult:
         """Promote; ``interrupt`` simulates a crash "during_replay" (before quarantine
@@ -198,11 +198,11 @@ class ScenarioRunner(abc.ABC):
                 g.versions.complete_promotion = _power_cut  # type: ignore[method-assign]
             elif interrupt is not None:
                 raise ValueError(interrupt)
-            return g.promote(block, approve=approve)
+            return g.shadow_promote(block, approve=approve)
 
-    def rollback_version(self, block: str) -> Promotion:
+    def shadow_rollback(self, block: str) -> Promotion:
         with self._acting_guardian() as g:
-            return g.rollback_version(block)
+            return g.shadow_rollback(block)
 
     def active_version(self, block: str) -> str | None:
         return self._read(lambda g: g.active_version(block))

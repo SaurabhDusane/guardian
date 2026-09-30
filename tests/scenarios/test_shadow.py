@@ -84,8 +84,8 @@ def test_out_block_promotes_in_absolute_mode_only_with_approval(runner, role: st
     assert runner.status(x) is BlockStatus.OUT
 
     with pytest.raises(PromotionError, match="absolute mode"):
-        runner.promote(x)
-    promoted = runner.promote(x, approve=True)
+        runner.shadow_promote(x)
+    promoted = runner.shadow_promote(x, approve=True)
 
     assert (promoted.from_version, promoted.to_version, promoted.resumed) == ("v1", "v2", False)
     assert runner.active_version(x) == "v2"
@@ -163,7 +163,7 @@ def test_bad_candidate_is_never_promoted(runner, role: str) -> None:
         assert r.changed_fraction > policy.max_changed_fraction
         assert r.comparison.changed_columns
     with pytest.raises(PromotionError, match="needs approval"):
-        runner.promote(x)
+        runner.shadow_promote(x)
 
     # live output unchanged, here and downstream; the candidate really was different
     for i in range(1, runs_n + 1):
@@ -184,12 +184,12 @@ def test_rollback_after_promotion_restores_previous_version(runner, role: str) -
     runner.shadow_start(x, "v2")
     runner.run("r1")
     with pytest.raises(PromotionError, match="needs approval"):
-        runner.promote(x)  # fewer runs than the policy requires
-    runner.promote(x, approve=True)
+        runner.shadow_promote(x)  # fewer runs than the policy requires
+    runner.shadow_promote(x, approve=True)
     runner.run("r2")
     assert runner.provenance(x, "r2")["version"] == "v2"
 
-    rollback = runner.rollback_version(x)
+    rollback = runner.shadow_rollback(x)
     assert (rollback.kind, rollback.from_version, rollback.to_version) == (
         PromotionKind.ROLLBACK,
         "v2",
@@ -300,7 +300,7 @@ def test_interrupted_promotion_is_resumable(runner, role: str, interrupt: str) -
     assert runner.last_good(x).run_id == "r2"
 
     with pytest.raises(RuntimeError, match="power cut"):
-        runner.promote(x, approve=True, interrupt=interrupt)
+        runner.shadow_promote(x, approve=True, interrupt=interrupt)
 
     # the registry does not claim a completed promotion
     pending = runner.pending_promotion(x)
@@ -313,7 +313,7 @@ def test_interrupted_promotion_is_resumable(runner, role: str, interrupt: str) -
         assert all(r.status is QuarantineStatus.QUARANTINED for r in records)
         assert runner.last_good(x).run_id == "r2"
 
-    resumed = runner.promote(x)  # resumable without re-approving
+    resumed = runner.shadow_promote(x)  # resumable without re-approving
     assert resumed.resumed and resumed.to_version == "v2"
     assert runner.pending_promotion(x) is None
     assert runner.active_version(x) == "v2"
@@ -327,7 +327,7 @@ def test_interrupted_promotion_is_resumable(runner, role: str, interrupt: str) -
     records = runner.quarantine(block=x, run_id="r1")
     assert all(r.status is QuarantineStatus.REPLAYED for r in records if r.rule_name == "rollback")
     with pytest.raises(PromotionError, match="no candidate in shadow"):
-        runner.promote(x)
+        runner.shadow_promote(x)
 
     result = runner.run("r3")
     assert runner.provenance(x, "r3")["version"] == "v2"

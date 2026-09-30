@@ -21,8 +21,8 @@ from ..helpers.project_repo import git
 from .helpers import SPEC, run
 
 FORBIDDEN = [
-    "promote",
-    "rollback_version",
+    "shadow_promote",
+    "shadow_rollback",
     "shadow_start",
     "shadow_stop",
     "run_shadow",

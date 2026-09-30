@@ -823,7 +823,7 @@ def _simulate_reviewer(
         g.shadow_start(case.block, proposal.version)
         Executor(g).run(SHADOW_RUN, only=[case.block])
         try:
-            g.promote(case.block, approve=True, reason="eval: simulated reviewer approval")
+            g.shadow_promote(case.block, approve=True, reason="eval: simulated reviewer approval")
         except PromotionError as exc:
             return False, str(exc)
         if g.active_version(case.block) != proposal.version:

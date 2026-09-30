@@ -132,7 +132,9 @@ def _open(
 def run(
     spec: Path = typer.Argument(..., help="Path to the pipeline YAML spec."),
     root: Path = RootOption,
-    run_id: str | None = typer.Option(None, "--run-id", help="Run id (default: generated)."),
+    run_id: str | None = typer.Option(
+        None, "--run-id", help="Id for the new run this command starts (default: generated)."
+    ),
     sample_rate: float = typer.Option(
         1.0, "--sample-rate", min=0.0, max=1.0, help="Sample rate for routine events."
     ),
@@ -366,7 +368,7 @@ def shadow_promote(
 ) -> None:
     """Promote BLOCK's shadow candidate (or resume an interrupted promotion)."""
     with _guarded(root, spec) as g:
-        result = g.promote(block, approve=approve)
+        result = g.shadow_promote(block, approve=approve)
         console.print(
             f"{block}: {'resumed and completed' if result.resumed else 'promoted'} "
             f"{result.from_version} -> [green]{result.to_version}[/green] ({result.reason}); "
@@ -384,7 +386,7 @@ def shadow_rollback(
 ) -> None:
     """Make BLOCK's previous version active again (no data is rewritten)."""
     with _guarded(root, spec) as g:
-        rollback = g.rollback_version(block)
+        rollback = g.shadow_rollback(block)
         console.print(
             f"{block}: rolled back {rollback.from_version} -> "
             f"[green]{rollback.to_version}[/green]; last-good is "
@@ -553,7 +555,7 @@ def render_lineage(root: LineageNode) -> Tree:
 def drift_cmd(
     block: str = typer.Argument(..., help="Any block in the spec."),
     run: str | None = typer.Option(
-        None, "--run", help="Run to show (default: the block's latest checked run)."
+        None, "--run", help="Existing run to show (default: the block's latest checked run)."
     ),
     spec: Path | None = SpecOption,
     root: Path = RootOption,
@@ -631,7 +633,7 @@ def _llm_config(provider: str | None, model: str | None, fake: Path | None) -> L
 def diagnose_cmd(
     block: str = typer.Argument(..., help="Any block in the spec."),
     run: str | None = typer.Option(
-        None, "--run", help="Run to diagnose (default: the block's latest ROLLBACK)."
+        None, "--run", help="Existing run to diagnose (default: the block's latest ROLLBACK)."
     ),
     sample_size: int = typer.Option(
         DEFAULT_SAMPLE_SIZE, "--sample-size", min=0, help="Quarantined rows to include."
@@ -709,7 +711,9 @@ def render_diagnosis(result: DiagnosisResult) -> None:
 def propose_cmd(
     block: str = typer.Argument(..., help="Any block in the spec."),
     run: str | None = typer.Option(
-        None, "--run", help="Run whose failure to fix (default: the block's latest ROLLBACK)."
+        None,
+        "--run",
+        help="Existing run whose failure to fix (default: the block's latest ROLLBACK).",
     ),
     open_pr: bool = typer.Option(
         False,
@@ -1033,7 +1037,9 @@ def eval_diagnose_cmd(
     workdir: Path | None = typer.Option(
         None, "--workdir", help="Keep the cases' state here (default: a temporary directory)."
     ),
-    blocks: list[str] | None = typer.Option(None, "--block", help="Only these blocks."),
+    blocks: list[str] | None = typer.Option(
+        None, "--block", help="Only cases for these existing blocks of the spec (repeatable)."
+    ),
     roles: list[str] | None = RolesOption,
     faults: list[str] | None = typer.Option(
         None,
@@ -1084,7 +1090,9 @@ def eval_propose_cmd(
     repo: Path | None = typer.Option(
         None, "--repo", help="Git repository to propose fixes against (default: the spec's)."
     ),
-    blocks: list[str] | None = typer.Option(None, "--block", help="Only these blocks."),
+    blocks: list[str] | None = typer.Option(
+        None, "--block", help="Only cases for these existing blocks of the spec (repeatable)."
+    ),
     roles: list[str] | None = RolesOption,
     faults: list[str] | None = typer.Option(
         None, "--faults", "--fault-type", help="Accepted for symmetry; only code_bug is valid."

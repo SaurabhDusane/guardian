@@ -153,10 +153,10 @@ def test_source_block_without_load_cannot_be_shadowed(tmp_path) -> None:
 
 def test_promote_needs_a_candidate_and_a_run(g) -> None:
     with pytest.raises(PromotionError, match="no candidate in shadow"):
-        g.promote("b")
+        g.shadow_promote("b")
     g.shadow_start("b", "v2")
     with pytest.raises(PromotionError, match="has not run yet"):
-        g.promote("b", approve=True)
+        g.shadow_promote("b", approve=True)
 
 
 def test_auto_promotion_after_required_parity_runs(g) -> None:
@@ -177,8 +177,8 @@ def test_expect_diff_is_never_auto_promoted(g) -> None:
         run(g, f"r{i}")
     assert g.active_version("b") == "v1"
     with pytest.raises(PromotionError, match="expect-diff"):
-        g.promote("b")
-    assert g.promote("b", approve=True).to_version == "v2"
+        g.shadow_promote("b")
+    assert g.shadow_promote("b", approve=True).to_version == "v2"
 
 
 def test_approval_cannot_promote_a_candidate_failing_validation(g) -> None:
@@ -187,7 +187,7 @@ def test_approval_cannot_promote_a_candidate_failing_validation(g) -> None:
     (last,) = g.shadow_runs("b")[1]
     assert last.pass_rate == 0.0 and not last.within_tolerance
     with pytest.raises(PromotionError, match="fails validation"):
-        g.promote("b", approve=True)
+        g.shadow_promote("b", approve=True)
     assert g.active_version("b") == "v1"
 
 
@@ -216,7 +216,7 @@ def test_promotion_of_an_out_block_marks_it_healthy_and_restores_edges(g) -> Non
     assert report.get("b").outcome is Outcome.SKIPPED
     assert report.get("b").shadow.mode is ShadowMode.ABSOLUTE
     assert report.get("c").rerouted  # b is OUT: c uses its fallback
-    g.promote("b", approve=True)
+    g.shadow_promote("b", approve=True)
     assert g.status("b") is BlockStatus.HEALTHY
     report = run(g, "r2")
     assert not report.get("c").rerouted and report.get("c").sources[0].block == "b"
@@ -224,7 +224,7 @@ def test_promotion_of_an_out_block_marks_it_healthy_and_restores_edges(g) -> Non
 
 def test_rollback_without_promotion_is_refused(g) -> None:
     with pytest.raises(Exception, match="no previous version"):
-        g.rollback_version("b")
+        g.shadow_rollback("b")
 
 
 # ---------------------------------------------------------------- provenance
@@ -292,7 +292,7 @@ def test_long_lived_guardian_sees_promotions_made_elsewhere(tmp_path) -> None:
         run(long_lived, "r0")
         cli.shadow_start("b", "v2")
         run(long_lived, "r1")  # the long-lived instance runs the candidate started elsewhere
-        cli.promote("b", approve=True)
+        cli.shadow_promote("b", approve=True)
         report = run(long_lived, "r2")
         assert report.get("b").version == "v2"
         assert long_lived.provenance.get("b", "r2").as_dict()["version"] == "v2"

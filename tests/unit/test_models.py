@@ -1,16 +1,12 @@
-from pathlib import Path
-
 import pytest
 
 from guardian.core.models import (
-    DEFAULT_STORAGE_ROOT,
     Action,
     BlockSpec,
     DataRef,
     Decision,
     FallbackEdge,
     PipelineSpec,
-    RunContext,
     validate_name,
 )
 
@@ -88,15 +84,6 @@ def test_decision_bad_fraction() -> None:
     assert Decision("b", "r", Action.PASS).bad_fraction == 0.0
     d = Decision("b", "r", Action.ROLLBACK, total_rows=10, good_rows=7, bad_rows=3)
     assert d.bad_fraction == pytest.approx(0.3)
-
-
-def test_run_context_defaults() -> None:
-    ctx = RunContext(run_id="r1")
-    assert ctx.storage_root == DEFAULT_STORAGE_ROOT == Path(".guardian")
-    assert ctx.started_at.tzinfo is not None
-    assert isinstance(RunContext("r2", storage_root="x").storage_root, Path)  # type: ignore[arg-type]
-    with pytest.raises(ValueError):
-        RunContext(run_id="bad/id")
 
 
 def test_merge_key_validation() -> None:

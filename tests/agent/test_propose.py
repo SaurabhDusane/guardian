@@ -388,10 +388,10 @@ def test_propose_never_touches_promotion_or_shadow_state(tmp_path, project_repo,
         raise AssertionError("the agent called a state-changing Guardian method")
 
     for name in (
-        "promote",
+        "shadow_promote",
         "shadow_start",
         "shadow_stop",
-        "rollback_version",
+        "shadow_rollback",
         "set_block_status",
         "replay",
     ):

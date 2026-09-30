@@ -291,7 +291,7 @@ def test_replay_nothing_quarantined(guardian) -> None:
 def _state(g: Guardian, block: str = "b1") -> tuple:
     """Everything a replay could change."""
     return (
-        g.snapshots.list_runs(block),
+        sorted(p.stem for p in (g.root / "snapshots" / block).glob("*.parquet")),
         g.snapshots.last_good(block),
         g.status(block),
         [(r.id, r.status, r.replay_run_id) for r in g.quarantine.list(block=block)],

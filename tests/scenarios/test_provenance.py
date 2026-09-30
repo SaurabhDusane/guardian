@@ -161,7 +161,7 @@ def test_next_run_is_fresh_after_promotion_and_replay(runner, role: str) -> None
     runner.shadow_start(x, "v2")
     runner.run("r2")  # x OUT: dependents read it stale, the candidate runs
     assert all(quality(runner, d, "r2") != FRESH for d in dependents(SPEC, x))
-    runner.promote(x, approve=True)  # replays x's quarantine through v2
+    runner.shadow_promote(x, approve=True)  # replays x's quarantine through v2
     replay = runner.promotions(x)[-1].replay_run_id
     if replay is not None:
         assert quality(runner, x, replay) == FRESH

@@ -66,15 +66,6 @@ def restore_dtypes(df: pd.DataFrame, dtypes: Mapping[str, Any]) -> pd.DataFrame:
     return out
 
 
-def entries_from_frame(
-    block: str, run_id: str, df: pd.DataFrame, rule_name: str, reason: str
-) -> list[QuarantineEntry]:
-    return [
-        QuarantineEntry(block, run_id, rule_name, reason, payload)
-        for payload in rows_to_payloads(df)
-    ]
-
-
 @runtime_checkable
 class QuarantineStore(Protocol):
     """Rows held back from a block's output, each with its rule, reason and original row."""
